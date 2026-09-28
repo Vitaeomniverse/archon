@@ -883,13 +883,17 @@ equals the credential's. Verification counts a presented credential only when:
    that DID, or, for credentials issued before they carried an `id` (#948),
    the issuer controls the credential asset. A holder therefore cannot copy a
    revoked credential to a fresh asset;
-5. it names a `credentialSchema` that an unsatisfied challenge request asks
-   for and, when that request lists `issuers`, its issuer is among them.
+5. it meets a challenge request: its `credentialSchema` is the request's
+   schema and, when the request lists `issuers`, its issuer is among them.
 
-Each request is satisfied by at most one credential, and each credential DID
-counts once. `vps` holds the credentials that pass, and `match` is whether
-every request is satisfied. `requested` and `fulfilled` are the responder's
-own counts, returned as sent.
+Requests and credentials are paired one to one: each request is met by at
+most one credential, and each credential DID meets at most one request. Both
+the holder choosing what to present and the verifier checking it find a
+pairing that meets as many requests as possible (a maximum bipartite
+matching), so the result does not depend on the order credentials are held or
+presented. `vps` holds the credentials in that pairing, and `match` is whether
+every request is met. `requested` and `fulfilled` are the responder's own
+counts, returned as sent.
 
 An entry whose `vc` or `vp` is not a DID string is not counted. Python
 keymasters before #1300 embedded the credential itself as `vp`; nothing binds

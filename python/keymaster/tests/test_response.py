@@ -549,3 +549,88 @@ def test_verify_response_requires_hashes_on_both_envelopes(testbed):
     challenge = _challenge(km, [{"schema": schema, "issuers": [alice]}])
     verified = _present(km, victor, challenge, [{"vc": vc, "plaintext": original, "include_hash": False}])
     assert verified["vps"] == []
+
+
+# Credential assignment: Alice and Bob issue, Carol holds, Victor challenges.
+
+def _assignment_setup(testbed):
+    km = testbed.keymaster
+    alice = run(km.create_id("Alice"))
+    bob = run(km.create_id("Bob"))
+    carol = run(km.create_id("Carol"))
+    run(km.create_id("Victor"))
+    run(km.set_current_id("Alice"))
+    schema = run(km.create_schema(MOCK_SCHEMA))
+
+    def issue(issuer):
+        run(km.set_current_id(issuer))
+        vc = run(km.issue_credential(run(km.bind_credential(carol, {"schema": schema}))))
+        run(km.set_current_id("Carol"))
+        assert run(km.accept_credential(vc)) is True
+        return vc
+
+    return alice, bob, schema, issue
+
+
+def _respond_to(km, requests):
+    run(km.set_current_id("Victor"))
+    challenge = run(km.create_challenge({"credentials": requests}))
+    run(km.set_current_id("Carol"))
+    response = run(km.create_response(challenge))
+    run(km.set_current_id("Victor"))
+    return run(km.verify_response(response))
+
+
+def test_create_response_presents_distinct_credentials_for_repeated_requests(testbed):
+    km = testbed.keymaster
+    alice, _, schema, issue = _assignment_setup(testbed)
+    issue("Alice")
+    issue("Alice")
+
+    verified = _respond_to(km, [{"schema": schema, "issuers": [alice]}, {"schema": schema, "issuers": [alice]}])
+    assert verified["fulfilled"] == 2
+    assert len(verified["vps"]) == 2
+    assert verified["match"] is True
+
+
+def test_create_response_assigns_credentials_so_every_satisfiable_request_is_met(testbed):
+    km = testbed.keymaster
+    alice, bob, schema, issue = _assignment_setup(testbed)
+    # Held in this order, a first-fit choice gives Alice's credential to the
+    # broad request and leaves the Alice-only request unmet.
+    issue("Alice")
+    issue("Bob")
+
+    verified = _respond_to(km, [{"schema": schema, "issuers": [alice, bob]}, {"schema": schema, "issuers": [alice]}])
+    assert verified["fulfilled"] == 2
+    assert verified["match"] is True
+
+
+def test_verify_response_finds_an_assignment_the_presentation_order_hides(testbed):
+    km = testbed.keymaster
+    alice, bob, schema, issue = _assignment_setup(testbed)
+    from_alice = issue("Alice")
+    from_bob = issue("Bob")
+    victor = run(km.resolve_did("Victor"))["didDocument"]["id"]
+
+    run(km.set_current_id("Victor"))
+    challenge = run(km.create_challenge({"credentials": [
+        {"schema": schema, "issuers": [alice, bob]}, {"schema": schema, "issuers": [alice]},
+    ]}))
+
+    # Alice's credential first: a first-fit verifier spends it on the broad
+    # request.
+    run(km.set_current_id("Carol"))
+    credentials = []
+    for vc in [from_alice, from_bob]:
+        vp = run(km.encrypt_message(run(km.decrypt_message(vc)), victor, {"includeHash": True}))
+        credentials.append({"vc": vc, "vp": vp})
+    response = run(km.encrypt_json(
+        {"response": {"challenge": challenge, "credentials": credentials, "requested": 2, "fulfilled": 2, "match": True}},
+        victor,
+    ))
+
+    run(km.set_current_id("Victor"))
+    verified = run(km.verify_response(response))
+    assert len(verified["vps"]) == 2
+    assert verified["match"] is True

@@ -150,6 +150,45 @@ const REMOTE_NAME_LOOKUP_TIMEOUT_MS = 2000;
 const ADDRESS_CHALLENGE_RESPONSE_RETRIES = 5;
 const ADDRESS_CHALLENGE_RESPONSE_DELAY_MS = 1000;
 
+// Whether a credential satisfies one challenge request: the request's schema
+// and, when the request names issuers, one of them. Holders choosing what to
+// present and verifiers checking it apply the same rule.
+function meetsRequest(credential: VerifiableCredential, request: { schema: string, issuers?: string[] }): boolean {
+    return !!request.schema && credential.credentialSchema?.id === request.schema &&
+        (!request.issuers?.length || request.issuers.includes(credential.issuer));
+}
+
+// Assigns distinct candidates to requests, maximizing how many are met:
+// accepts[r] lists the candidates request r accepts, and the result gives each
+// request's candidate or -1. First-fit choice can spend a credential on a
+// request another could have met; augmenting paths reassign it. Challenges
+// are small, so the simple algorithm is enough.
+function assignRequests(accepts: number[][]): number[] {
+    const holder = new Map<number, number>();
+    const claim = (request: number, seen: Set<number>): boolean => {
+        for (const candidate of accepts[request]) {
+            if (seen.has(candidate)) {
+                continue;
+            }
+            seen.add(candidate);
+            const current = holder.get(candidate);
+            if (current === undefined || claim(current, seen)) {
+                holder.set(candidate, request);
+                return true;
+            }
+        }
+        return false;
+    };
+
+    accepts.forEach((_, request) => claim(request, new Set()));
+
+    const assigned = accepts.map(() => -1);
+    for (const [candidate, request] of holder) {
+        assigned[request] = candidate;
+    }
+    return assigned;
+}
+
 function isRemoteNameReference(value: string): boolean {
     if (typeof value !== 'string') {
         return false;
@@ -4565,48 +4604,26 @@ export default class Keymaster implements KeymasterInterface {
         return this.createAsset({ challenge }, options);
     }
 
-    private async findMatchingCredential(
-        credential: {
-            schema: string;
-            issuers?: string[]
-        }
-    ): Promise<string | undefined> {
+    // The verifiable credentials the current ID holds as their subject.
+    private async heldCredentials(): Promise<{ did: string, credential: VerifiableCredential }[]> {
         const id = await this.fetchIdInfo();
+        const held = [];
 
-        if (!id.held) {
-            return;
-        }
-
-        for (let did of id.held) {
+        for (const did of id.held ?? []) {
             try {
-                const doc = await this.decryptJSON(did);
+                const credential = await this.decryptJSON(did);
 
-                if (!this.isVerifiableCredential(doc)) {
-                    continue;
+                // A credential the ID issued rather than holds is not its to present.
+                if (this.isVerifiableCredential(credential) && credential.credentialSubject?.id === id.did) {
+                    held.push({ did, credential });
                 }
-
-                if (doc.credentialSubject?.id !== id.did) {
-                    // This VC is issued by the ID, not held
-                    continue;
-                }
-
-                if (credential.issuers && !credential.issuers.includes(doc.issuer)) {
-                    // Attestor not trusted by Verifier
-                    continue;
-                }
-
-                if (doc.credentialSchema?.id !== credential.schema) {
-                    // Wrong schema
-                    continue;
-                }
-
-                // TBD test for VC expiry too
-                return did;
             }
             catch (error) {
                 // Not encrypted, so can't be a VC
             }
         }
+
+        return held;
     }
 
     async createResponse(
@@ -4658,17 +4675,12 @@ export default class Keymaster implements KeymasterInterface {
 
         // TBD check challenge isValid for expired?
 
-        const matches = [];
-
-        if (challenge.credentials) {
-            for (let credential of challenge.credentials) {
-                const vc = await this.findMatchingCredential(credential);
-
-                if (vc) {
-                    matches.push(vc);
-                }
-            }
-        }
+        // TBD test for VC expiry too
+        const requests = challenge.credentials ?? [];
+        const held = requests.length ? await this.heldCredentials() : [];
+        const assigned = assignRequests(requests.map(request =>
+            held.flatMap(({ credential }, index) => meetsRequest(credential, request) ? [index] : [])));
+        const matches = assigned.filter(index => index >= 0).map(index => held[index].did);
 
         const pairs = [];
 
@@ -4804,9 +4816,8 @@ export default class Keymaster implements KeymasterInterface {
         }
 
         const requests = challenge.credentials ?? [];
-        const satisfied = requests.map(() => false);
         const presented = new Set<string>();
-        const vps: unknown[] = [];
+        const accepted: VerifiableCredential[] = [];
 
         for (let credential of response.credentials) {
             // Older Python responses embedded the credential itself, which
@@ -4856,23 +4867,18 @@ export default class Keymaster implements KeymasterInterface {
                 continue;
             }
 
-            // Each request is satisfied by at most one credential, of its
-            // schema and, when it names issuers, from one of them.
-            const schema = vp.credentialSchema?.id;
-            const index = schema ? requests.findIndex((request, i) => !satisfied[i] && request.schema === schema &&
-                (!request.issuers?.length || request.issuers.includes(vp.issuer))) : -1;
-
-            if (index < 0) {
-                continue;
-            }
-
-            satisfied[index] = true;
             presented.add(credential.vc);
-            vps.push(vp);
+            accepted.push(vp);
         }
 
-        response.vps = vps;
-        response.match = satisfied.every(Boolean);
+        // Each request is met by at most one credential, and each credential
+        // meets at most one request.
+        const assigned = assignRequests(requests.map(request =>
+            accepted.flatMap((vp, index) => meetsRequest(vp, request) ? [index] : [])));
+        const used = new Set(assigned);
+
+        response.vps = accepted.filter((_, index) => used.has(index));
+        response.match = assigned.every(index => index >= 0);
         response.responder = responseDoc.didDocument?.controller;
 
         return response;

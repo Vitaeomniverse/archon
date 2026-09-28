@@ -643,6 +643,82 @@ describe('verifyResponse credential binding', () => {
     });
 });
 
+describe('response credential assignment', () => {
+    // Alice and Bob issue, Carol holds, Victor challenges.
+    async function setup() {
+        const alice = await keymaster.createId('Alice');
+        const bob = await keymaster.createId('Bob');
+        const carol = await keymaster.createId('Carol');
+        await keymaster.createId('Victor');
+        await keymaster.setCurrentId('Alice');
+        const schema = await keymaster.createSchema(mockSchema);
+        const issue = async (issuer: string) => {
+            await keymaster.setCurrentId(issuer);
+            const vc = await keymaster.issueCredential(await keymaster.bindCredential(carol, { schema }));
+            await keymaster.setCurrentId('Carol');
+            await keymaster.acceptCredential(vc);
+            return vc;
+        };
+        return { alice, bob, schema, issue };
+    }
+
+    async function respond(requests: object[]) {
+        await keymaster.setCurrentId('Victor');
+        const challenge = await keymaster.createChallenge({ credentials: requests as any });
+        await keymaster.setCurrentId('Carol');
+        const response = await keymaster.createResponse(challenge);
+        await keymaster.setCurrentId('Victor');
+        return keymaster.verifyResponse(response);
+    }
+
+    it('presents distinct credentials for repeated requests', async () => {
+        const { alice, schema, issue } = await setup();
+        await issue('Alice');
+        await issue('Alice');
+
+        const verified = await respond([{ schema, issuers: [alice] }, { schema, issuers: [alice] }]);
+        expect(verified.fulfilled).toBe(2);
+        expect(verified.vps!.length).toBe(2);
+        expect(verified.match).toBe(true);
+    });
+
+    it('assigns credentials so every satisfiable request is met', async () => {
+        const { alice, bob, schema, issue } = await setup();
+        // Held in this order, a first-fit choice gives Alice's credential to
+        // the broad request and leaves the Alice-only request unmet.
+        await issue('Alice');
+        await issue('Bob');
+
+        const verified = await respond([{ schema, issuers: [alice, bob] }, { schema, issuers: [alice] }]);
+        expect(verified.fulfilled).toBe(2);
+        expect(verified.match).toBe(true);
+    });
+
+    it('verifies an assignment the presentation order hides', async () => {
+        const { alice, bob, schema, issue } = await setup();
+        const fromAlice = await issue('Alice');
+        const fromBob = await issue('Bob');
+        const victor = (await keymaster.resolveDID('Victor')).didDocument!.id!;
+
+        await keymaster.setCurrentId('Victor');
+        const challenge = await keymaster.createChallenge({ credentials: [{ schema, issuers: [alice, bob] }, { schema, issuers: [alice] }] });
+
+        // Alice's credential first: a first-fit verifier spends it on the
+        // broad request.
+        await keymaster.setCurrentId('Carol');
+        const credentials = [];
+        for (const vc of [fromAlice, fromBob]) {
+            credentials.push({ vc, vp: await keymaster.encryptMessage(await keymaster.decryptMessage(vc), victor, { includeHash: true }) });
+        }
+        const response = await keymaster.encryptJSON({ response: { challenge, credentials, requested: 2, fulfilled: 2, match: true } }, victor);
+
+        await keymaster.setCurrentId('Victor');
+        const verified = await keymaster.verifyResponse(response);
+        expect(verified.vps!.length).toBe(2);
+        expect(verified.match).toBe(true);
+    });
+});
+
 describe('verifyResponse historical', () => {
     const T0 = '2026-09-01T00:00:00.000Z';
     const at = (minutes: number) => new Date(Date.parse(T0) + minutes * 60_000).toISOString();

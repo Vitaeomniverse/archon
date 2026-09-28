@@ -92,6 +92,36 @@ MULTIKEY_CONTEXT = "https://w3id.org/security/multikey/v1"
 ARCHON_SECP256K1_CRYPTOSUITE = "archon-ecdsa-secp256k1-jcs-2026"
 
 
+def _assign_requests(accepts: list[list[int]]) -> list[int]:
+    """Assign distinct candidates to requests, maximizing how many are met.
+
+    accepts[r] lists the candidates request r accepts; the result gives each
+    request's candidate or -1. First-fit choice can spend a credential on a
+    request another could have met; augmenting paths reassign it. Mirrors
+    assignRequests in the TypeScript keymaster.
+    """
+    holder: dict[int, int] = {}
+
+    def claim(request: int, seen: set[int]) -> bool:
+        for candidate in accepts[request]:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            current = holder.get(candidate)
+            if current is None or claim(current, seen):
+                holder[candidate] = request
+                return True
+        return False
+
+    for request in range(len(accepts)):
+        claim(request, set())
+
+    assigned = [-1] * len(accepts)
+    for candidate, request in holder.items():
+        assigned[request] = candidate
+    return assigned
+
+
 def _proofs_of(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """The proofs on a document, however it carries them."""
     proof = payload.get("proof") if isinstance(payload, dict) else None
@@ -2327,8 +2357,10 @@ class Keymaster:
             if not current:
                 raise KeymasterError("No current ID")
             id_info = wallet["ids"][current]
-            held = set(id_info.get("held", []))
-            held.add(did)
+            # dict.fromkeys keeps insertion order, as the TypeScript Set does;
+            # a set would reorder held credentials per process.
+            held = dict.fromkeys(id_info.get("held", []))
+            held[did] = None
             id_info["held"] = list(held)
             await self._save_loaded_wallet(wallet, overwrite=True)
         return True
@@ -2341,11 +2373,11 @@ class Keymaster:
             if not current:
                 raise KeymasterError("No current ID")
             id_info = wallet["ids"][current]
-            held = set(id_info.get("held", []))
+            held = list(dict.fromkeys(id_info.get("held", [])))
             if did in held:
                 held.remove(did)
                 changed = True
-                id_info["held"] = list(held)
+                id_info["held"] = held
                 await self._save_loaded_wallet(wallet, overwrite=True)
         return changed
 
@@ -3309,15 +3341,16 @@ class Keymaster:
         )
 
     def credential_matches_request(self, credential: dict[str, Any], request: dict[str, Any]) -> bool:
-        schema_id = credential.get("credentialSchema", {}).get("id")
-        if request.get("schema") and schema_id != request.get("schema"):
+        # The request's schema and, when the request names issuers, one of
+        # them. Holders choosing what to present and verifiers checking it
+        # apply the same rule.
+        schema = request.get("schema")
+        credential_schema = credential.get("credentialSchema")
+        if not schema or not isinstance(credential_schema, dict) or credential_schema.get("id") != schema:
             return False
 
         issuers = request.get("issuers")
-        if isinstance(issuers, list) and issuers and credential.get("issuer") not in issuers:
-            return False
-
-        return True
+        return not (isinstance(issuers, list) and issuers and credential.get("issuer") not in issuers)
 
     async def bind_credential(
         self,
@@ -3996,28 +4029,27 @@ class Keymaster:
         if not requestor:
             raise KeymasterError("Invalid parameter: requestor undefined")
 
-        requests = challenge.get("credentials", []) if isinstance(challenge.get("credentials"), list) else []
-        held_credentials = await self.list_credentials()
-        matched_credentials = []
-        used_credentials: set[str] = set()
-
-        for request in requests:
-            if not isinstance(request, dict):
-                continue
-
-            for credential_did in held_credentials:
-                if credential_did in used_credentials:
-                    continue
-
+        requests = [
+            request for request in (challenge.get("credentials") if isinstance(challenge.get("credentials"), list) else [])
+            if isinstance(request, dict)
+        ]
+        held = []
+        if requests:
+            id_info = await self.fetch_id_info()
+            for credential_did in await self.list_credentials():
                 try:
                     credential = await self.get_credential(credential_did)
                 except Exception:
                     credential = None
+                # A credential the ID issued rather than holds is not its to present.
+                if credential and (credential.get("credentialSubject") or {}).get("id") == id_info["did"]:
+                    held.append((credential_did, credential))
 
-                if credential and self.credential_matches_request(credential, request):
-                    matched_credentials.append(credential_did)
-                    used_credentials.add(credential_did)
-                    break
+        assigned = _assign_requests([
+            [index for index, (_, credential) in enumerate(held) if self.credential_matches_request(credential, request)]
+            for request in requests
+        ])
+        matched_credentials = [held[index][0] for index in assigned if index >= 0]
 
         # Each presentation re-encrypts the credential's exact plaintext to the
         # requestor, so its cipher_hash matches the credential's and the
@@ -4028,7 +4060,7 @@ class Keymaster:
             presentation_did = await self.encrypt_message(plaintext, requestor, {**options, "includeHash": True})
             pairs.append({"vc": credential_did, "vp": presentation_did})
 
-        requested = len(requests)
+        requested = len(challenge.get("credentials")) if isinstance(challenge.get("credentials"), list) else 0
         response = {
             "challenge": challenge_did,
             "credentials": pairs,
@@ -4151,9 +4183,8 @@ class Keymaster:
         if not isinstance(challenge, dict):
             raise KeymasterError("Invalid parameter: challengeDID")
         requests = challenge.get("credentials") if isinstance(challenge.get("credentials"), list) else []
-        satisfied = [False] * len(requests)
         presented: set[str] = set()
-        vps: list[Any] = []
+        accepted: list[dict[str, Any]] = []
 
         for entry in response.get("credentials") or []:
             # Responses from before presentation DIDs embedded the credential
@@ -4201,29 +4232,19 @@ class Keymaster:
             elif (vc_doc.get("didDocument") or {}).get("controller") != issuer:
                 continue
 
-            # Each request is satisfied by at most one credential, of its schema
-            # and, when it names issuers, from one of them.
-            schema = vp.get("credentialSchema", {}).get("id") if isinstance(vp.get("credentialSchema"), dict) else None
-            index = next(
-                (
-                    i for i, request in enumerate(requests)
-                    if schema
-                    and not satisfied[i]
-                    and isinstance(request, dict)
-                    and request.get("schema") == schema
-                    and (not request.get("issuers") or issuer in request["issuers"])
-                ),
-                None,
-            )
-            if index is None:
-                continue
-
-            satisfied[index] = True
             presented.add(entry["vc"])
-            vps.append(vp)
+            accepted.append(vp)
 
-        response["vps"] = vps
-        response["match"] = all(satisfied)
+        # Each request is met by at most one credential, and each credential
+        # meets at most one request.
+        assigned = _assign_requests([
+            [index for index, vp in enumerate(accepted) if isinstance(request, dict) and self.credential_matches_request(vp, request)]
+            for request in requests
+        ])
+        used = set(assigned)
+
+        response["vps"] = [vp for index, vp in enumerate(accepted) if index in used]
+        response["match"] = all(index >= 0 for index in assigned)
         response["responder"] = response_doc.get("didDocument", {}).get("controller")
         return response
 
