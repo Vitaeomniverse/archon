@@ -527,6 +527,18 @@ describe('verifyResponse historical', () => {
         expect((await verifyAt(response, 15)).match).toBe(true);
     });
 
+    it('rejects a challenge revoked by the cutoff', async () => {
+        const { challenge, response } = await respond();
+
+        setNow(20);
+        await keymaster.setCurrentId('Victor');
+        await keymaster.revokeDID(challenge);
+
+        await expect(verifyAt(response)).rejects.toThrow('Invalid parameter: challengeDID');
+        expect((await verifyAt(response, 15)).match).toBe(true);
+        await expect(verifyAt(response, 25)).rejects.toThrow('Invalid parameter: challengeDID');
+    });
+
     it('checks the presentation in effect at the cutoff', async () => {
         const { vp, response } = await respond();
 
@@ -593,8 +605,16 @@ describe('verifyResponse historical', () => {
 
         await expect(keymaster.verifyResponse(response, { versionSequence: 1 }))
             .rejects.toThrow('Invalid parameter: versionSequence requires versionTime');
-        await expect(keymaster.verifyResponse(response, { versionTime: 'yesterday' }))
-            .rejects.toThrow('Invalid parameter: versionTime');
+        const malformed = ['yesterday', '0', '01/01/2026', '2026/09/01', '2026-09-01', '2026-09-01T00:15:00',
+            '2026-02-29T00:00:00Z', '2026-04-31T00:00:00Z', '2026-09-01T24:00:00Z', '2026-09-01T00:00:60Z',
+            '2026-09-01T00:15:00+24:00'];
+        for (const versionTime of malformed) {
+            await expect(keymaster.verifyResponse(response, { versionTime }))
+                .rejects.toThrow('Invalid parameter: versionTime');
+        }
+        for (const versionTime of ['2026-09-01t00:15:00.123456789z', '2026-09-01T02:15:00+02:00']) {
+            expect((await keymaster.verifyResponse(response, { versionTime })).match).toBe(true);
+        }
         await expect(keymaster.verifyResponse(response, { versionTime: at(15), versionSequence: 0 }))
             .rejects.toThrow('Invalid parameter: versionSequence');
     });

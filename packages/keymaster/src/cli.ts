@@ -710,7 +710,7 @@ program
 program
     .command('verify-response <response>')
     .description('Decrypt and validate a response to a challenge')
-    .option('-t, --version-time <time>', 'verify as of this ISO 8601 time')
+    .option('-t, --version-time <time>', 'verify as of this RFC 3339 time, with offset')
     .option('-s, --version-sequence <version>', 'verify this response version (requires --version-time)')
     .action(async (response, options) => {
         try {

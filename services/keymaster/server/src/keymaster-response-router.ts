@@ -128,7 +128,7 @@ export function createResponseRouter(options: CreateKeymasterRouterOptions): exp
      *                     type: string
      *                     format: date-time
      *                     description: >
-     *                       Verify in the context of this time. The response, challenge, credential, and presentation DIDs,
+     *                       RFC 3339 date-time with an offset. Verify in the context of this time. The response, challenge, credential, and presentation DIDs,
      *                       including the documents decrypted during verification, are resolved as of this time. A DID that
      *                       did not exist by then is an error rather than a fallback to its current state. Proof keys keep
      *                       their existing selection: each signer is resolved at its proof's `created` time. The time

@@ -6,6 +6,7 @@ from copy import deepcopy
 import json
 import logging
 import os
+import re
 import struct
 from typing import Any, NamedTuple, Protocol, cast
 from urllib.parse import urlparse
@@ -4006,15 +4007,40 @@ class Keymaster:
         }
         return await self.encrypt_json({"response": response}, requestor, options)
 
+    # RFC 3339 date-time with a required offset, matching the TypeScript
+    # check. fromisoformat alone also accepts dates and offset-less times, and
+    # an offset-less time would name a different instant on each host.
+    _RFC3339_DATE_TIME = re.compile(
+        r"^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(\.\d+)?([Zz]|[+-](\d{2}):(\d{2}))$"
+    )
+
+    @classmethod
+    def _is_rfc3339_date_time(cls, value: Any) -> bool:
+        import calendar
+
+        match = cls._RFC3339_DATE_TIME.match(value) if isinstance(value, str) else None
+        if not match:
+            return False
+        year, month, day, hour, minute, second = (int(part) for part in match.groups()[:6])
+        offset_hour, offset_minute = match.group(9), match.group(10)
+        return (
+            1 <= month <= 12
+            and 1 <= day <= calendar.monthrange(year, month)[1]
+            and hour <= 23 and minute <= 59 and second <= 59
+            and (offset_hour is None or (int(offset_hour) <= 23 and int(offset_minute) <= 59))
+        )
+
     @staticmethod
     def _parse_version_time(value: Any):
         import datetime as dt
 
         if not isinstance(value, str) or not value:
             raise ValueError(value)
+        # fromisoformat takes at most microseconds and only an upper-case T.
+        value = re.sub(r"(\.\d{6})\d+", r"\1", value.upper())
         parsed = dt.datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=dt.timezone.utc)
+            raise ValueError(value)
         return parsed
 
     # Resolves a DID read by historical response verification. Gatekeeper
@@ -4057,11 +4083,8 @@ class Keymaster:
         version_time = options.get("versionTime")
         version_sequence = options.get("versionSequence")
 
-        if version_time is not None:
-            try:
-                self._parse_version_time(version_time)
-            except ValueError as exc:
-                raise KeymasterError("Invalid parameter: versionTime") from exc
+        if version_time is not None and not self._is_rfc3339_date_time(version_time):
+            raise KeymasterError("Invalid parameter: versionTime")
 
         if version_sequence is not None:
             if isinstance(version_sequence, bool) or not isinstance(version_sequence, int) or version_sequence < 1:
@@ -4092,7 +4115,9 @@ class Keymaster:
         response = deepcopy(wrapper["response"])
         challenge_doc = await resolve(response["challenge"], "challenge")
         challenge_asset = {} if (challenge_doc.get("didDocumentMetadata") or {}).get("deactivated") else (challenge_doc.get("didDocumentData") or {})
-        challenge = challenge_asset.get("challenge") or {}
+        challenge = challenge_asset.get("challenge")
+        if not isinstance(challenge, dict):
+            raise KeymasterError("Invalid parameter: challengeDID")
         requests = challenge.get("credentials", []) if isinstance(challenge.get("credentials"), list) else []
         matched_vps = []
         satisfied = [False] * len(requests)

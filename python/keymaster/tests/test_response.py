@@ -201,6 +201,20 @@ def test_verify_response_historical_challenge(testbed):
     assert _verify_at(testbed, ctx["response"], 15)["match"] is True
 
 
+def test_verify_response_rejects_a_challenge_revoked_by_the_cutoff(testbed):
+    ctx = _historical_response(testbed)
+
+    testbed.gatekeeper.now = _at(20)
+    run(testbed.keymaster.set_current_id("Victor"))
+    run(testbed.keymaster.revoke_did(ctx["challenge"]))
+
+    with pytest.raises(KeymasterError, match="Invalid parameter: challengeDID"):
+        _verify_at(testbed, ctx["response"])
+    assert _verify_at(testbed, ctx["response"], 15)["match"] is True
+    with pytest.raises(KeymasterError, match="Invalid parameter: challengeDID"):
+        _verify_at(testbed, ctx["response"], 25)
+
+
 def test_verify_response_historical_response_version(testbed):
     ctx = _historical_response(testbed)
     km = testbed.keymaster
@@ -255,7 +269,13 @@ def test_verify_response_rejects_malformed_selectors(testbed):
 
     with pytest.raises(KeymasterError, match="Invalid parameter: versionSequence requires versionTime"):
         run(km.verify_response(ctx["response"], {"versionSequence": 1}))
-    with pytest.raises(KeymasterError, match="Invalid parameter: versionTime"):
-        run(km.verify_response(ctx["response"], {"versionTime": "yesterday"}))
+    malformed = ["yesterday", "0", "01/01/2026", "2026/09/01", "2026-09-01", "2026-09-01T00:15:00",
+                 "2026-02-29T00:00:00Z", "2026-04-31T00:00:00Z", "2026-09-01T24:00:00Z", "2026-09-01T00:00:60Z",
+                 "2026-09-01T00:15:00+24:00"]
+    for version_time in malformed:
+        with pytest.raises(KeymasterError, match="Invalid parameter: versionTime"):
+            run(km.verify_response(ctx["response"], {"versionTime": version_time}))
+    for version_time in ["2026-09-01t00:15:00.123456789z", "2026-09-01T02:15:00+02:00"]:
+        assert run(km.verify_response(ctx["response"], {"versionTime": version_time}))["match"] is True
     with pytest.raises(KeymasterError, match="Invalid parameter: versionSequence"):
         run(km.verify_response(ctx["response"], {"versionTime": _at(15), "versionSequence": 0}))

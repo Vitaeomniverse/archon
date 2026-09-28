@@ -4681,6 +4681,25 @@ export default class Keymaster implements KeymasterInterface {
         return await this.encryptJSON({ response }, requestor!, options);
     }
 
+    // RFC 3339 date-time with a required offset. Date.parse alone accepts
+    // other formats and rolls impossible dates over, and a time without an
+    // offset would name a different instant on each host.
+    private static isRfc3339DateTime(value: unknown): value is string {
+        const match = typeof value === 'string'
+            && /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(\.\d+)?([Zz]|[+-](\d{2}):(\d{2}))$/.exec(value);
+
+        if (!match) {
+            return false;
+        }
+
+        const [, year, month, day, hour, minute, second, , , offsetHour, offsetMinute] = match.map(Number);
+        const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+
+        return month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth
+            && hour <= 23 && minute <= 59 && second <= 59
+            && (Number.isNaN(offsetHour) || (offsetHour <= 23 && offsetMinute <= 59));
+    }
+
     // Resolves a DID read by historical response verification. Gatekeeper
     // answers a cutoff before creation with the creation version and a
     // sequence past the latest with the latest version; neither is the
@@ -4720,7 +4739,7 @@ export default class Keymaster implements KeymasterInterface {
         let { retries = 0, delay = 1000 } = options;
         const { versionTime, versionSequence } = options;
 
-        if (versionTime !== undefined && (typeof versionTime !== 'string' || Number.isNaN(Date.parse(versionTime)))) {
+        if (versionTime !== undefined && !Keymaster.isRfc3339DateTime(versionTime)) {
             throw new InvalidParameterError('versionTime');
         }
 

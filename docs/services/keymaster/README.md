@@ -879,13 +879,18 @@ resolution.
 
 | Option | Meaning |
 | --- | --- |
-| `versionTime` | ISO 8601 time that sets the verification context. The response, its challenge, and each credential and presentation DID — including the documents decrypted during verification — are resolved as of this time. |
+| `versionTime` | RFC 3339 date-time with an offset (for example `2026-09-01T00:15:00Z`) that sets the verification context. Other date formats, times without an offset, and impossible dates are rejected. The response, its challenge, and each credential and presentation DID — including the documents decrypted during verification — are resolved as of this time. |
 | `versionSequence` | Version of the **response** DID to verify. It requires `versionTime`: a response version says nothing about when its references were checked, so `versionTime` still selects the context of the challenge, credential and presentation DIDs, and must not precede the selected response version. |
 
 Historical reads never fall back to current state. A DID created after
 `versionTime`, a response version later than `versionTime`, or a
 `versionSequence` the response does not have is an `Invalid parameter` error.
-Creation times are compared at the one-second precision Gatekeeper reports.
+Gatekeeper reports `created`, `updated` and `deleted` to the second, and
+Keymaster's own checks — whether a DID existed by `versionTime`, and whether the
+selected response version precedes it — compare those reported times. A
+cutoff inside the same second as a creation or the selected response version
+is therefore treated as including it. Gatekeeper applies `versionTime` to each
+DID's later updates at full precision.
 
 Proof-key selection is unchanged: each credential signature is still checked
 against the issuer's key at the proof's `created` time, and each encrypted
@@ -922,6 +927,9 @@ keymaster.verify_response(response_did, {"versionTime": "2026-09-01T00:15:00Z"})
 The Python keymaster currently embeds each presented credential in the
 encrypted response rather than creating a separate presentation DID, so its
 historical selector applies to the response, challenge and credential reads.
+The credential read decides only whether the credential was revoked: the
+embedded copy is not compared with the credential's content, so a credential
+update does not change a Python verification (#1300).
 
 ---
 

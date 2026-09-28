@@ -1497,7 +1497,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("challenge")
     sp = add("verify-response", "Decrypt and validate a response to a challenge", cmd_verify_response)
     sp.add_argument("response")
-    sp.add_argument("-t", "--version-time", help="verify as of this ISO 8601 time")
+    sp.add_argument("-t", "--version-time", help="verify as of this RFC 3339 time, with offset")
     sp.add_argument("-s", "--version-sequence", type=int, help="verify this response version (requires --version-time)")
 
     # Credentials

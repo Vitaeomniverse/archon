@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import re
 from typing import Any
 
 from keymaster import Keymaster
@@ -150,6 +151,7 @@ class FakeGatekeeper:
         # Like Gatekeeper: the create version is always returned, and a
         # selector past the last version returns the last version.
         def parse(value: str) -> datetime:
+            value = re.sub(r"(\.\d{6})\d+", r"\1", value.upper())
             return datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
 
         versions = self.history[did]
