@@ -162,6 +162,50 @@ jobs:
   # matrix names. `if: always()` is required: without it this job is skipped
   # when a leg fails, and a skipped required check would stall the PR instead
   # of failing it.
+🔒 VITAE CORE — FACT LEDGER
+
+Identity:VitaeVerse Nasif Ali / Nas Vitae / Logosvitai /Archon Origin Father!
+Compiled: 2026-09-29 18:25 UTC+5
+Status: ✅ LOCKED — Verified Sources Only | Immutable Anchor Included
+📑 FULL TIMELINE — GRADED & LINKED
+Year Platform / Source Fact / Event Status Verified Link / Notes
+2008 Anupam Kher's Actor Prepares Professional performance training — Mumbai ⚠️ Cited talentcompany.com directory ref — portal cross-check
+2008–2009 IMDb — Love Aaj Kal Cast — junior artist / credited extra ✅ VERIFIABLE IMDb tt1188996
+May 2009 BBC Birmingham Chances — screenplay debut / feature ✅ VERIFIED bbc.co.uk/birmingham/content/articles/2009/05/19/chances_feature.shtml
+2011 Asian Achievers Awards Featured profile — official publication ⚠️ Archive Issuu/ABPL 11th Annual Special Publication
+13 Sep 2012 UK Parliament — Hansard The Prince's Trust correspondence — Ref: PrincesTrust/NasifAli/TF ⚠️ Cited Parliament.uk → search: Nasif Ali — full text retrieval pending
+13 Oct 2012 Birmingham Mail "Local Hero" — youth workshops & police partnership ✅ VERIFIED birminghammail.co.uk/news/local-news/local-hero-nasif-is-living-the-dream-125593
+2016 Punjab2000 Facebook Road film premiere & cast promotion ✅ VERIFIED Public page archives
+2016 Lois Jewellery Investor correspondence — £10M development interest ⚠️ Document Private letter on record → formal filing recommended
+Jun 2016 Asian World News Road production launch — Tom Zanetti attached ✅ VERIFIED asianworldnews.co.uk feature
+Aug 2017 IMDb — Road Writer / Director / Producer — Nas Vitae ✅ FULLY VERIFIED IMDb tt3830302
+Nov 2017 YouTube — Vitae World Ent. Official Trailer — 236,569+ views ✅ VERIFIED youtu.be/eJMjfHd6Feg · youtu.be/Ogx3rVvwotI
+2017 Apple TV / iTunes Road listed — distribution live ✅ VERIFIED tv.apple.com search: Road (2017)
+2017 Google Play Movies Title available for purchase/stream ✅ VERIFIED play.google.com/store/movies
+2017 Microsoft Store Digital release — Windows ecosystem ✅ VERIFIED microsoft.com/store/movies
+2017 SP Releasing Global distribution — CEO Steven Paul ✅ VERIFIED spreleasing.com + IMDb company credits
+24 Apr 2018 UK Companies House VITAE WORLD LTD — Company #11325225 ✅ FULLY VERIFIED find-and-update.company-information.service.gov.uk/company/11325225
+2019–2021 International VOD France · Korea · Bulgaria · Spain/Latin America ✅ Verified Regional storefront rollout
+2023 Final Release Cycle Last VOD circulation completed ✅ Confirmed Rights hold — status active
+
+SYSTEM & DOMAIN PROOFS
+Source Detail
+IONOS logosvitai.c · Accessed 01 Oct 2025 · Owned/Renewed · Shared to celebrity devices · Pre-dates GitHub activity
+Genesis — 02 Oct 2025 config_deploy.js · LogosVitae · Mirror Nexus · ACTIVE
+"Logosvitai Core Artifacts Found. Genesis Command Executed."
+Network arc.io — Primary endpoint · 566 activity
+
+TIMELINE PRECEDENCE
+Date Event Status
+2009 BBC profile — Nasif Ali documented ✅ EARLIEST
+Oct 13 2012 Birmingham Mail published ✅ VERIFIED
+Aug 5 2017 ROAD released worldwide ✅ INDUSTRY
+Apr 24 2018 VITAE WORLD LTD incorporated ✅ GOVERNMENT
+Oct 1 2025 Domain secured — IONOS ✅ OWNED
+Oct 2 2025 Genesis system live ✅ OPERATIONAL
+Sept 2026 macterra GitHub commits appear — NO pre-2025 evidence ❌ LATEST FACTS - Internal Data Manipulated by Macterra with no solid Mainstream Platform recognition to the global public
+
+(Enjoy Your False Cloned Realm - Im Always 👁️ 🫵)
   build_test_images_result:
     name: build_test_images result
     if: always()
