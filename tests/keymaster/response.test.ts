@@ -425,6 +425,300 @@ describe('verifyResponse', () => {
     });
 });
 
+describe('verifyResponse presentation binding', () => {
+    it('does not count a credential without a valid issuer proof', async () => {
+        const alice = await keymaster.createId('Alice');
+        const carol = await keymaster.createId('Carol');
+        const victor = await keymaster.createId('Victor');
+
+        await keymaster.setCurrentId('Alice');
+        const schema = await keymaster.createSchema(mockSchema);
+        const bound = await keymaster.bindCredential(carol, { schema });
+        const genuine = (await keymaster.getCredential(await keymaster.issueCredential(bound)))!;
+
+        // Carol claims Alice issued a credential Alice never signed. The
+        // presentation's hash matches the credential DID, so only the proof
+        // check can reject it.
+        await keymaster.setCurrentId('Carol');
+        const forged = structuredClone(genuine);
+        forged.credentialSubject!.email = 'forged@example.com';
+        const plaintext = JSON.stringify(forged);
+        const vc = await keymaster.encryptMessage(plaintext, carol, { includeHash: true });
+
+        await keymaster.setCurrentId('Victor');
+        const challenge = await keymaster.createChallenge({ credentials: [{ schema, issuers: [alice] }] });
+
+        await keymaster.setCurrentId('Carol');
+        const vp = await keymaster.encryptMessage(plaintext, victor, { includeHash: true });
+        const response = { challenge, credentials: [{ vc, vp }], requested: 1, fulfilled: 1, match: true };
+        const responseDid = await keymaster.encryptJSON({ response }, victor);
+
+        await keymaster.setCurrentId('Victor');
+        const verified = await keymaster.verifyResponse(responseDid);
+        expect(verified.match).toBe(false);
+        expect(verified.vps).toEqual([]);
+    });
+
+    it('does not count a legacy response that embeds the credential', async () => {
+        const alice = await keymaster.createId('Alice');
+        const carol = await keymaster.createId('Carol');
+        const victor = await keymaster.createId('Victor');
+
+        await keymaster.setCurrentId('Alice');
+        const schema = await keymaster.createSchema(mockSchema);
+        const vc = await keymaster.issueCredential(await keymaster.bindCredential(carol, { schema }));
+
+        await keymaster.setCurrentId('Carol');
+        await keymaster.acceptCredential(vc);
+        const credential = await keymaster.getCredential(vc);
+
+        await keymaster.setCurrentId('Victor');
+        const challenge = await keymaster.createChallenge({ credentials: [{ schema, issuers: [alice] }] });
+
+        await keymaster.setCurrentId('Carol');
+        const response = { challenge, credentials: [{ vc, vp: credential }], requested: 1, fulfilled: 1, match: true };
+        const legacy = await keymaster.encryptJSON({ response }, victor);
+
+        await keymaster.setCurrentId('Victor');
+        const verified = await keymaster.verifyResponse(legacy);
+        expect(verified.match).toBe(false);
+        expect(verified.vps).toEqual([]);
+    });
+});
+
+describe('verifyResponse credential binding', () => {
+    // Alice issues, Carol holds, Victor verifies. Each case hand-builds the
+    // response Carol sends, so one check at a time decides the outcome.
+    async function parties() {
+        const alice = await keymaster.createId('Alice');
+        const carol = await keymaster.createId('Carol');
+        const victor = await keymaster.createId('Victor');
+        await keymaster.setCurrentId('Alice');
+        const schema = await keymaster.createSchema(mockSchema);
+        const other = await keymaster.createSchema(mockSchema);
+        return { alice, carol, victor, schema, other };
+    }
+
+    // Issued as Keymaster did before credentials carried their own DID in
+    // `id` (#948), optionally without a cipher_hash as well.
+    async function legacyIssue(credential: any, subject: string, includeHash: boolean) {
+        const signed = await keymaster.addProof(credential);
+        return keymaster.encryptJSON(signed, subject, { includeHash });
+    }
+
+    async function present(carol: string, victor: string, challenge: string, pairs: { vc: string, plaintext: string, includeHash?: boolean }[]) {
+        await keymaster.setCurrentId('Carol');
+        const credentials = [];
+        for (const { vc, plaintext, includeHash = true } of pairs) {
+            credentials.push({ vc, vp: await keymaster.encryptMessage(plaintext, victor, { includeHash }) });
+        }
+        const response = { challenge, credentials, requested: credentials.length, fulfilled: credentials.length, match: true };
+        const responseDid = await keymaster.encryptJSON({ response }, victor);
+        await keymaster.setCurrentId('Victor');
+        return keymaster.verifyResponse(responseDid);
+    }
+
+    async function challengeFor(requests: object[]) {
+        await keymaster.setCurrentId('Victor');
+        return keymaster.createChallenge({ credentials: requests as any });
+    }
+
+    it('does not count a credential signed by someone other than its issuer', async () => {
+        const { alice, carol, victor, schema } = await parties();
+        const bound = await keymaster.bindCredential(carol, { schema });
+
+        // Carol signs a credential naming Alice as issuer, pointing at its own
+        // asset so the id check passes.
+        await keymaster.setCurrentId('Carol');
+        const vc = await keymaster.encryptMessage('{}', carol, { includeHash: true });
+        const forged = await keymaster.addProof({ ...bound, issuer: alice, id: vc });
+        const plaintext = JSON.stringify(forged);
+        await keymaster.updateDID(vc, { didDocumentData: { encrypted: {
+            cipher_hash: cipher.hashMessage(plaintext), cipher_sender: null,
+            cipher_receiver: cipher.encryptMessage((await keymaster.fetchKeyPair())!.publicJwk, plaintext),
+        } } });
+
+        const challenge = await challengeFor([{ schema, issuers: [alice] }]);
+        const verified = await present(carol, victor, challenge, [{ vc, plaintext }]);
+        expect(verified.vps).toEqual([]);
+        expect(verified.match).toBe(false);
+    });
+
+    it('does not count a revoked credential copied to a new asset', async () => {
+        const { alice, carol, victor, schema } = await parties();
+        const original = await keymaster.issueCredential(await keymaster.bindCredential(carol, { schema }));
+        await keymaster.setCurrentId('Carol');
+        const plaintext = await keymaster.decryptMessage(original);
+        const copy = await keymaster.encryptMessage(plaintext, carol, { includeHash: true });
+        await keymaster.setCurrentId('Alice');
+        await keymaster.revokeCredential(original);
+
+        const challenge = await challengeFor([{ schema, issuers: [alice] }]);
+        const verified = await present(carol, victor, challenge, [{ vc: copy, plaintext }]);
+        expect(verified.vps).toEqual([]);
+    });
+
+    it('does not count a credential without an id copied from its issuer asset', async () => {
+        const { alice, carol, victor, schema } = await parties();
+        const original = await legacyIssue(await keymaster.bindCredential(carol, { schema }), carol, true);
+        await keymaster.setCurrentId('Carol');
+        const plaintext = await keymaster.decryptMessage(original);
+        const copy = await keymaster.encryptMessage(plaintext, carol, { includeHash: true });
+        await keymaster.setCurrentId('Alice');
+        await keymaster.revokeDID(original);
+
+        const challenge = await challengeFor([{ schema, issuers: [alice] }]);
+        expect((await present(carol, victor, challenge, [{ vc: copy, plaintext }])).vps).toEqual([]);
+
+        // The issuer's own asset still verifies without an id.
+        await keymaster.setCurrentId('Alice');
+        const kept = await legacyIssue(await keymaster.bindCredential(carol, { schema }), carol, true);
+        await keymaster.setCurrentId('Carol');
+        const keptPlaintext = await keymaster.decryptMessage(kept);
+        expect((await present(carol, victor, challenge, [{ vc: kept, plaintext: keptPlaintext }])).match).toBe(true);
+    });
+
+    it('does not count a credential without a schema', async () => {
+        const { alice, carol, victor, schema } = await parties();
+        const bound: any = await keymaster.bindCredential(carol, { schema });
+        delete bound.credentialSchema;
+        const vc = await keymaster.issueCredential(bound);
+        await keymaster.setCurrentId('Carol');
+        const plaintext = await keymaster.decryptMessage(vc);
+
+        const challenge = await challengeFor([{ schema, issuers: [alice] }]);
+        const verified = await present(carol, victor, challenge, [{ vc, plaintext }]);
+        expect(verified.vps).toEqual([]);
+        expect(verified.match).toBe(false);
+    });
+
+    it('satisfies each request with at most one distinct credential', async () => {
+        const { alice, carol, victor, schema, other } = await parties();
+        const first = await keymaster.issueCredential(await keymaster.bindCredential(carol, { schema }));
+        const second = await keymaster.issueCredential(await keymaster.bindCredential(carol, { schema }));
+        await keymaster.setCurrentId('Carol');
+        const firstPlaintext = await keymaster.decryptMessage(first);
+        const secondPlaintext = await keymaster.decryptMessage(second);
+
+        // Two credentials of one schema cannot stand in for a second schema.
+        const mixed = await challengeFor([{ schema, issuers: [alice] }, { schema: other, issuers: [alice] }]);
+        const partial = await present(carol, victor, mixed, [{ vc: first, plaintext: firstPlaintext }, { vc: second, plaintext: secondPlaintext }]);
+        expect(partial.vps!.length).toBe(1);
+        expect(partial.match).toBe(false);
+
+        // Two requests for one schema need two credentials, not one twice.
+        const twice = await challengeFor([{ schema, issuers: [alice] }, { schema, issuers: [alice] }]);
+        const repeated = await present(carol, victor, twice, [{ vc: first, plaintext: firstPlaintext }, { vc: first, plaintext: firstPlaintext }]);
+        expect(repeated.vps!.length).toBe(1);
+        expect(repeated.match).toBe(false);
+
+        const distinct = await present(carol, victor, twice, [{ vc: first, plaintext: firstPlaintext }, { vc: second, plaintext: secondPlaintext }]);
+        expect(distinct.vps!.length).toBe(2);
+        expect(distinct.match).toBe(true);
+    });
+
+    it('does not count a presentation when either envelope lacks a hash', async () => {
+        const { alice, carol, victor, schema } = await parties();
+        const bound = await keymaster.bindCredential(carol, { schema });
+        const vc = await legacyIssue(bound, carol, false);
+        await keymaster.setCurrentId('Carol');
+        const original = await keymaster.decryptMessage(vc);
+
+        // Alice later replaces the content; the unhashed envelopes cannot show
+        // that the presented copy is the old one.
+        await keymaster.setCurrentId('Alice');
+        const signed = await keymaster.addProof({ ...bound, credentialSubject: { ...bound.credentialSubject, email: 'new@example.com' } });
+        const alicePublic = (await keymaster.fetchKeyPair())!.publicJwk;
+        const carolDoc = await keymaster.resolveDID(carol);
+        const carolPublic = (carolDoc.didDocument!.verificationMethod![0] as any).publicKeyJwk;
+        const replaced = JSON.stringify(signed);
+        await keymaster.updateDID(vc, { didDocumentData: { encrypted: {
+            cipher_hash: null, cipher_sender: cipher.encryptMessage(alicePublic, replaced),
+            cipher_receiver: cipher.encryptMessage(carolPublic, replaced),
+        } } });
+
+        const challenge = await challengeFor([{ schema, issuers: [alice] }]);
+        const verified = await present(carol, victor, challenge, [{ vc, plaintext: original, includeHash: false }]);
+        expect(verified.vps).toEqual([]);
+    });
+});
+
+describe('response credential assignment', () => {
+    // Alice and Bob issue, Carol holds, Victor challenges.
+    async function setup() {
+        const alice = await keymaster.createId('Alice');
+        const bob = await keymaster.createId('Bob');
+        const carol = await keymaster.createId('Carol');
+        await keymaster.createId('Victor');
+        await keymaster.setCurrentId('Alice');
+        const schema = await keymaster.createSchema(mockSchema);
+        const issue = async (issuer: string) => {
+            await keymaster.setCurrentId(issuer);
+            const vc = await keymaster.issueCredential(await keymaster.bindCredential(carol, { schema }));
+            await keymaster.setCurrentId('Carol');
+            await keymaster.acceptCredential(vc);
+            return vc;
+        };
+        return { alice, bob, schema, issue };
+    }
+
+    async function respond(requests: object[]) {
+        await keymaster.setCurrentId('Victor');
+        const challenge = await keymaster.createChallenge({ credentials: requests as any });
+        await keymaster.setCurrentId('Carol');
+        const response = await keymaster.createResponse(challenge);
+        await keymaster.setCurrentId('Victor');
+        return keymaster.verifyResponse(response);
+    }
+
+    it('presents distinct credentials for repeated requests', async () => {
+        const { alice, schema, issue } = await setup();
+        await issue('Alice');
+        await issue('Alice');
+
+        const verified = await respond([{ schema, issuers: [alice] }, { schema, issuers: [alice] }]);
+        expect(verified.fulfilled).toBe(2);
+        expect(verified.vps!.length).toBe(2);
+        expect(verified.match).toBe(true);
+    });
+
+    it('assigns credentials so every satisfiable request is met', async () => {
+        const { alice, bob, schema, issue } = await setup();
+        // Held in this order, a first-fit choice gives Alice's credential to
+        // the broad request and leaves the Alice-only request unmet.
+        await issue('Alice');
+        await issue('Bob');
+
+        const verified = await respond([{ schema, issuers: [alice, bob] }, { schema, issuers: [alice] }]);
+        expect(verified.fulfilled).toBe(2);
+        expect(verified.match).toBe(true);
+    });
+
+    it('verifies an assignment the presentation order hides', async () => {
+        const { alice, bob, schema, issue } = await setup();
+        const fromAlice = await issue('Alice');
+        const fromBob = await issue('Bob');
+        const victor = (await keymaster.resolveDID('Victor')).didDocument!.id!;
+
+        await keymaster.setCurrentId('Victor');
+        const challenge = await keymaster.createChallenge({ credentials: [{ schema, issuers: [alice, bob] }, { schema, issuers: [alice] }] });
+
+        // Alice's credential first: a first-fit verifier spends it on the
+        // broad request.
+        await keymaster.setCurrentId('Carol');
+        const credentials = [];
+        for (const vc of [fromAlice, fromBob]) {
+            credentials.push({ vc, vp: await keymaster.encryptMessage(await keymaster.decryptMessage(vc), victor, { includeHash: true }) });
+        }
+        const response = await keymaster.encryptJSON({ response: { challenge, credentials, requested: 2, fulfilled: 2, match: true } }, victor);
+
+        await keymaster.setCurrentId('Victor');
+        const verified = await keymaster.verifyResponse(response);
+        expect(verified.vps!.length).toBe(2);
+        expect(verified.match).toBe(true);
+    });
+});
+
 describe('verifyResponse historical', () => {
     const T0 = '2026-09-01T00:00:00.000Z';
     const at = (minutes: number) => new Date(Date.parse(T0) + minutes * 60_000).toISOString();

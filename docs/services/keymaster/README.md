@@ -869,6 +869,42 @@ verifier-prover protocol:
 }
 ```
 
+Each presentation (`vp`) is a separate asset that re-encrypts the credential's
+exact plaintext to the challenger with `includeHash`, so its `cipher_hash`
+equals the credential's. Verification counts a presented credential only when:
+
+1. the credential and presentation both resolve to live encrypted assets
+   (a revoked credential or presentation is not counted);
+2. both carry a `cipher_hash` and the two are equal, binding the presentation
+   to the credential DID's current content;
+3. the decrypted presentation has a `type` array and a valid proof by its
+   `issuer` — a proof by any other key does not count;
+4. the credential lives at the DID presented for it: its signed `id` equals
+   that DID, or, for credentials issued before they carried an `id` (#948),
+   the issuer controls the credential asset. A holder therefore cannot copy a
+   revoked credential to a fresh asset;
+5. it meets a challenge request: its `credentialSchema` is the request's
+   schema and, when the request lists `issuers`, its issuer is among them.
+
+Requests and credentials are paired one to one: each request is met by at
+most one credential, and each credential DID meets at most one request. Both
+the holder choosing what to present and the verifier checking it find a
+pairing that meets as many requests as possible (a maximum bipartite
+matching), so the result does not depend on the order credentials are held or
+presented. `vps` holds the credentials in that pairing, and `match` is whether
+every request is met. `requested` and `fulfilled` are the responder's own
+counts, returned as sent.
+
+An entry whose `vc` or `vp` is not a DID string is not counted. Python
+keymasters before #1300 embedded the credential itself as `vp`; nothing binds
+that copy to the credential DID, so such responses do not verify. Responses
+default to a one-hour `validUntil`, so these do not persist.
+
+Both ports create and verify this format. `tests/fixtures/response-interop.json`
+holds responses each port created and the other verified against a real
+Gatekeeper; each unit suite re-verifies the other port's responses from it
+(regenerate with `tests/keymaster/generate-response-interop-vectors.mjs`).
+
 ### 9.4 Historical response verification
 
 By default `verifyResponse` checks the current state of every DID involved, so
@@ -923,13 +959,6 @@ await keymaster.verifyResponse(responseDid, { versionTime: '2026-09-01T00:15:00Z
 ```python
 keymaster.verify_response(response_did, {"versionTime": "2026-09-01T00:15:00Z"})
 ```
-
-The Python keymaster currently embeds each presented credential in the
-encrypted response rather than creating a separate presentation DID, so its
-historical selector applies to the response, challenge and credential reads.
-The credential read decides only whether the credential was revoked: the
-embedded copy is not compared with the credential's content, so a credential
-update does not change a Python verification (#1300).
 
 ---
 

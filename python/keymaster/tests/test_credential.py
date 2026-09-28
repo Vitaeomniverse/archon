@@ -561,3 +561,22 @@ def test_archon_suite_rejects_a_proof_validly_signed_over_a_config_with_no_conte
     proof_value = b64url(bytes.fromhex(sign_hash(hash_message(payload), keypair["privateJwk"])))
 
     assert run(km.verify_proof({**document, "proof": [{**config, "proofValue": proof_value}]})) is False
+
+
+def test_held_credentials_keep_acceptance_order(testbed):
+    # A set here reordered held credentials per process, which decided which
+    # credential a response presented.
+    km = testbed.keymaster
+    run(km.create_id("Alice"))
+    carol = run(km.create_id("Carol"))
+    run(km.set_current_id("Alice"))
+    schema = run(km.create_schema(MOCK_SCHEMA))
+    issued = [run(km.issue_credential(run(km.bind_credential(carol, {"schema": schema})))) for _ in range(4)]
+
+    run(km.set_current_id("Carol"))
+    for vc in issued:
+        assert run(km.accept_credential(vc)) is True
+    assert run(km.list_credentials()) == issued
+
+    assert run(km.remove_credential(issued[1])) is True
+    assert run(km.list_credentials()) == [issued[0], *issued[2:]]

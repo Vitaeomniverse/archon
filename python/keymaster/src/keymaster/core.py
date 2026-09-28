@@ -92,6 +92,36 @@ MULTIKEY_CONTEXT = "https://w3id.org/security/multikey/v1"
 ARCHON_SECP256K1_CRYPTOSUITE = "archon-ecdsa-secp256k1-jcs-2026"
 
 
+def _assign_requests(accepts: list[list[int]]) -> list[int]:
+    """Assign distinct candidates to requests, maximizing how many are met.
+
+    accepts[r] lists the candidates request r accepts; the result gives each
+    request's candidate or -1. First-fit choice can spend a credential on a
+    request another could have met; augmenting paths reassign it. Mirrors
+    assignRequests in the TypeScript keymaster.
+    """
+    holder: dict[int, int] = {}
+
+    def claim(request: int, seen: set[int]) -> bool:
+        for candidate in accepts[request]:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            current = holder.get(candidate)
+            if current is None or claim(current, seen):
+                holder[candidate] = request
+                return True
+        return False
+
+    for request in range(len(accepts)):
+        claim(request, set())
+
+    assigned = [-1] * len(accepts)
+    for candidate, request in holder.items():
+        assigned[request] = candidate
+    return assigned
+
+
 def _proofs_of(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """The proofs on a document, however it carries them."""
     proof = payload.get("proof") if isinstance(payload, dict) else None
@@ -2100,6 +2130,17 @@ class Keymaster:
         # An unrecognised cryptosuite is somebody else's, not a failure of ours.
         return False
 
+    # verify_proof accepts a proof by any resolvable key. This requires one by
+    # the given signer, as a credential's issuer must be.
+    async def _verify_proof_by(self, payload: dict[str, Any], signer: str) -> bool:
+        proofs = [
+            proof for proof in _proofs_of(payload)
+            if isinstance(proof, dict) and str(proof.get("verificationMethod") or "").split("#")[0] == signer
+        ]
+        if not proofs:
+            return False
+        return await self.verify_proof({**payload, "proof": proofs[0] if len(proofs) == 1 else proofs})
+
     async def verify_proof(self, payload: dict[str, Any]) -> bool:
         proofs = _proofs_of(payload)
         if not proofs:
@@ -2316,8 +2357,10 @@ class Keymaster:
             if not current:
                 raise KeymasterError("No current ID")
             id_info = wallet["ids"][current]
-            held = set(id_info.get("held", []))
-            held.add(did)
+            # dict.fromkeys keeps insertion order, as the TypeScript Set does;
+            # a set would reorder held credentials per process.
+            held = dict.fromkeys(id_info.get("held", []))
+            held[did] = None
             id_info["held"] = list(held)
             await self._save_loaded_wallet(wallet, overwrite=True)
         return True
@@ -2330,11 +2373,11 @@ class Keymaster:
             if not current:
                 raise KeymasterError("No current ID")
             id_info = wallet["ids"][current]
-            held = set(id_info.get("held", []))
+            held = list(dict.fromkeys(id_info.get("held", [])))
             if did in held:
                 held.remove(did)
                 changed = True
-                id_info["held"] = list(held)
+                id_info["held"] = held
                 await self._save_loaded_wallet(wallet, overwrite=True)
         return changed
 
@@ -2390,6 +2433,17 @@ class Keymaster:
 
         clone_data = {**asset_data, "cloned": asset_doc.get("didDocument", {}).get("id")}
         return await self.create_asset(clone_data, options or {})
+
+    @staticmethod
+    def _asset_data(doc: dict[str, Any]) -> Any:
+        # Matches TypeScript assetData: only a live, controlled asset has data.
+        if (
+            not (doc.get("didDocument") or {}).get("controller")
+            or not doc.get("didDocumentData")
+            or (doc.get("didDocumentMetadata") or {}).get("deactivated")
+        ):
+            return {}
+        return doc["didDocumentData"]
 
     async def resolve_asset(self, did: str, options: dict[str, Any] | None = None) -> Any:
         doc = await self.resolve_did(did, options)
@@ -3287,15 +3341,16 @@ class Keymaster:
         )
 
     def credential_matches_request(self, credential: dict[str, Any], request: dict[str, Any]) -> bool:
-        schema_id = credential.get("credentialSchema", {}).get("id")
-        if request.get("schema") and schema_id != request.get("schema"):
+        # The request's schema and, when the request names issuers, one of
+        # them. Holders choosing what to present and verifiers checking it
+        # apply the same rule.
+        schema = request.get("schema")
+        credential_schema = credential.get("credentialSchema")
+        if not schema or not isinstance(credential_schema, dict) or credential_schema.get("id") != schema:
             return False
 
         issuers = request.get("issuers")
-        if isinstance(issuers, list) and issuers and credential.get("issuer") not in issuers:
-            return False
-
-        return True
+        return not (isinstance(issuers, list) and issuers and credential.get("issuer") not in issuers)
 
     async def bind_credential(
         self,
@@ -3974,36 +4029,44 @@ class Keymaster:
         if not requestor:
             raise KeymasterError("Invalid parameter: requestor undefined")
 
-        requests = challenge.get("credentials", []) if isinstance(challenge.get("credentials"), list) else []
-        held_credentials = await self.list_credentials()
-        matched_credentials = []
-        used_credentials: set[str] = set()
-
-        for request in requests:
-            if not isinstance(request, dict):
-                continue
-
-            for credential_did in held_credentials:
-                if credential_did in used_credentials:
-                    continue
-
+        requests = [
+            request for request in (challenge.get("credentials") if isinstance(challenge.get("credentials"), list) else [])
+            if isinstance(request, dict)
+        ]
+        held = []
+        if requests:
+            id_info = await self.fetch_id_info()
+            for credential_did in await self.list_credentials():
                 try:
                     credential = await self.get_credential(credential_did)
                 except Exception:
                     credential = None
+                # A credential the ID issued rather than holds is not its to present.
+                if credential and (credential.get("credentialSubject") or {}).get("id") == id_info["did"]:
+                    held.append((credential_did, credential))
 
-                if credential and self.credential_matches_request(credential, request):
-                    matched_credentials.append({"vc": credential_did, "vp": credential})
-                    used_credentials.add(credential_did)
-                    break
+        assigned = _assign_requests([
+            [index for index, (_, credential) in enumerate(held) if self.credential_matches_request(credential, request)]
+            for request in requests
+        ])
+        matched_credentials = [held[index][0] for index in assigned if index >= 0]
 
-        requested = len(requests)
+        # Each presentation re-encrypts the credential's exact plaintext to the
+        # requestor, so its cipher_hash matches the credential's and the
+        # verifier can bind one to the other.
+        pairs = []
+        for credential_did in matched_credentials:
+            plaintext = await self.decrypt_message(credential_did)
+            presentation_did = await self.encrypt_message(plaintext, requestor, {**options, "includeHash": True})
+            pairs.append({"vc": credential_did, "vp": presentation_did})
+
+        requested = len(challenge.get("credentials")) if isinstance(challenge.get("credentials"), list) else 0
         response = {
             "challenge": challenge_did,
-            "credentials": matched_credentials,
+            "credentials": pairs,
             "requested": requested,
-            "fulfilled": len(matched_credentials),
-            "match": requested == len(matched_credentials),
+            "fulfilled": len(pairs),
+            "match": requested == len(pairs),
         }
         return await self.encrypt_json({"response": response}, requestor, options)
 
@@ -4115,50 +4178,73 @@ class Keymaster:
             raise KeymasterError("Invalid parameter: responseDID not a valid challenge response")
         response = deepcopy(wrapper["response"])
         challenge_doc = await resolve(response["challenge"], "challenge")
-        challenge_asset = {} if (challenge_doc.get("didDocumentMetadata") or {}).get("deactivated") else (challenge_doc.get("didDocumentData") or {})
-        challenge = challenge_asset.get("challenge")
+        challenge_asset = self._asset_data(challenge_doc)
+        challenge = challenge_asset.get("challenge") if isinstance(challenge_asset, dict) else None
         if not isinstance(challenge, dict):
             raise KeymasterError("Invalid parameter: challengeDID")
-        requests = challenge.get("credentials", []) if isinstance(challenge.get("credentials"), list) else []
-        matched_vps = []
-        satisfied = [False] * len(requests)
+        requests = challenge.get("credentials") if isinstance(challenge.get("credentials"), list) else []
+        presented: set[str] = set()
+        accepted: list[dict[str, Any]] = []
 
-        for entry in response.get("credentials", []):
-            if not isinstance(entry, dict) or not isinstance(entry.get("vc"), str):
+        for entry in response.get("credentials") or []:
+            # Responses from before presentation DIDs embedded the credential
+            # itself, which nothing binds to the credential DID it names.
+            if (
+                not isinstance(entry, dict)
+                or not isinstance(entry.get("vc"), str)
+                or not isinstance(entry.get("vp"), str)
+                or entry["vc"] in presented
+            ):
                 continue
 
-            if version_time is not None:
-                credential_doc = await resolve(entry["vc"], "credential")
-            else:
-                try:
-                    credential_doc = await self.resolve_did(entry["vc"])
-                except Exception:
+            vc_doc = await resolve(entry["vc"], "credential")
+            vc_data = self._asset_data(vc_doc)
+            vp_doc = await resolve(entry["vp"], "presentation")
+            vp_data = self._asset_data(vp_doc)
+            vc_encrypted = vc_data.get("encrypted") if isinstance(vc_data, dict) else None
+            vp_encrypted = vp_data.get("encrypted") if isinstance(vp_data, dict) else None
+
+            if not isinstance(vc_encrypted, dict) or not isinstance(vp_encrypted, dict):
+                # VC revoked
+                continue
+
+            # Without a hash on both, nothing shows the presentation carries the
+            # credential's current content.
+            if not vc_encrypted.get("cipher_hash") or vc_encrypted.get("cipher_hash") != vp_encrypted.get("cipher_hash"):
+                continue
+
+            vp = await self._decrypt_resolved_json(vp_doc)
+            if not isinstance(vp, dict) or not isinstance(vp.get("type"), list):
+                continue
+
+            # Any key can sign; only a proof by the named issuer vouches for it.
+            issuer = vp.get("issuer")
+            if not isinstance(issuer, str) or not await self._verify_proof_by(vp, issuer):
+                continue
+
+            # The credential must live at the DID presented for it, or a holder
+            # could copy a revoked one to a fresh asset. Credentials name their
+            # asset in `id` (#948); earlier ones are bound by the issuer
+            # controlling the asset.
+            if "id" in vp:
+                if vp["id"] != entry["vc"]:
                     continue
-            if credential_doc.get("didDocumentMetadata", {}).get("deactivated"):
+            elif (vc_doc.get("didDocument") or {}).get("controller") != issuer:
                 continue
 
-            credential = entry.get("vp") if isinstance(entry.get("vp"), dict) else None
-            if not credential:
-                try:
-                    decrypted = await self._decrypt_resolved_json(credential_doc)
-                    credential = decrypted if self.is_verifiable_credential(decrypted) else None
-                except Exception:
-                    credential = None
-            if not credential:
-                continue
+            presented.add(entry["vc"])
+            accepted.append(vp)
 
-            for index, request in enumerate(requests):
-                if satisfied[index] or not isinstance(request, dict):
-                    continue
-                if self.credential_matches_request(credential, request):
-                    matched_vps.append({"vc": entry["vc"], "vp": credential})
-                    satisfied[index] = True
-                    break
+        # Each request is met by at most one credential, and each credential
+        # meets at most one request.
+        assigned = _assign_requests([
+            [index for index, vp in enumerate(accepted) if isinstance(request, dict) and self.credential_matches_request(vp, request)]
+            for request in requests
+        ])
+        used = set(assigned)
 
-        response["vps"] = matched_vps
-        response["requested"] = len(requests)
-        response["fulfilled"] = len(matched_vps)
-        response["match"] = len(matched_vps) == len(requests)
+        response["vps"] = [vp for index, vp in enumerate(accepted) if index in used]
+        response["match"] = all(index >= 0 for index in assigned)
         response["responder"] = response_doc.get("didDocument", {}).get("controller")
         return response
 
