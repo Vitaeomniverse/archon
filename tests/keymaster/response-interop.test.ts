@@ -42,7 +42,7 @@ beforeEach(async () => {
 });
 
 describe('Python responses verified by TypeScript', () => {
-    it('present each credential through its own presentation DID', async () => {
+    it('presents each credential through its own presentation DID', async () => {
         for (const response of Object.values(direction.responses) as string[]) {
             const { response: { credentials } } = await keymaster.decryptJSON(response) as any;
             expect(credentials.length).toBe(1);

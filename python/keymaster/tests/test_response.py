@@ -6,6 +6,7 @@ import json
 import pytest
 
 from keymaster import KeymasterError, UnknownIDError
+from keymaster.crypto import encrypt_message, hash_message
 
 from .helpers import MOCK_SCHEMA, run
 
@@ -382,4 +383,169 @@ def test_verify_response_does_not_count_legacy_inline_credentials(testbed):
 
     verified = _verify_at(testbed, legacy)
     assert verified["match"] is False
+    assert verified["vps"] == []
+
+
+# Credential binding: Alice issues, Carol holds, Victor verifies. Each case
+# hand-builds the response Carol sends, so one check decides the outcome.
+
+def _parties(testbed):
+    km = testbed.keymaster
+    alice = run(km.create_id("Alice"))
+    carol = run(km.create_id("Carol"))
+    victor = run(km.create_id("Victor"))
+    run(km.set_current_id("Alice"))
+    schema = run(km.create_schema(MOCK_SCHEMA))
+    other = run(km.create_schema(MOCK_SCHEMA))
+    return alice, carol, victor, schema, other
+
+
+def _legacy_issue(km, credential, subject, include_hash):
+    # Issued as Keymaster did before credentials carried their own DID in
+    # `id` (#948), optionally without a cipher_hash as well.
+    signed = run(km.add_proof(credential))
+    return run(km.encrypt_json(signed, subject, {"includeHash": include_hash}))
+
+
+def _present(km, victor, challenge, pairs):
+    run(km.set_current_id("Carol"))
+    credentials = []
+    for pair in pairs:
+        vp = run(km.encrypt_message(pair["plaintext"], victor, {"includeHash": pair.get("include_hash", True)}))
+        credentials.append({"vc": pair["vc"], "vp": vp})
+    response = {"challenge": challenge, "credentials": credentials,
+                "requested": len(credentials), "fulfilled": len(credentials), "match": True}
+    response_did = run(km.encrypt_json({"response": response}, victor))
+    run(km.set_current_id("Victor"))
+    return run(km.verify_response(response_did))
+
+
+def _challenge(km, requests):
+    run(km.set_current_id("Victor"))
+    return run(km.create_challenge({"credentials": requests}))
+
+
+def test_verify_response_requires_a_proof_by_the_issuer(testbed):
+    km = testbed.keymaster
+    alice, carol, victor, schema, _ = _parties(testbed)
+    bound = run(km.bind_credential(carol, {"schema": schema}))
+
+    # Carol signs a credential naming Alice as issuer, pointing at its own
+    # asset so the id check passes.
+    run(km.set_current_id("Carol"))
+    vc = run(km.encrypt_message("{}", carol, {"includeHash": True}))
+    forged = run(km.add_proof({**bound, "issuer": alice, "id": vc}))
+    plaintext = json.dumps(forged, separators=(",", ":"))
+    carol_public = run(km.fetch_key_pair())["publicJwk"]
+    run(km.update_did(vc, {"didDocumentData": {"encrypted": {
+        "cipher_hash": hash_message(plaintext), "cipher_sender": None,
+        "cipher_receiver": encrypt_message(carol_public, plaintext),
+    }}}))
+
+    challenge = _challenge(km, [{"schema": schema, "issuers": [alice]}])
+    verified = _present(km, victor, challenge, [{"vc": vc, "plaintext": plaintext}])
+    assert verified["vps"] == []
+    assert verified["match"] is False
+
+
+def test_verify_response_rejects_a_revoked_credential_copied_to_a_new_asset(testbed):
+    km = testbed.keymaster
+    alice, carol, victor, schema, _ = _parties(testbed)
+    original = run(km.issue_credential(run(km.bind_credential(carol, {"schema": schema}))))
+    run(km.set_current_id("Carol"))
+    plaintext = run(km.decrypt_message(original))
+    copy = run(km.encrypt_message(plaintext, carol, {"includeHash": True}))
+    run(km.set_current_id("Alice"))
+    run(km.revoke_credential(original))
+
+    challenge = _challenge(km, [{"schema": schema, "issuers": [alice]}])
+    assert _present(km, victor, challenge, [{"vc": copy, "plaintext": plaintext}])["vps"] == []
+
+
+def test_verify_response_binds_credentials_without_an_id_to_the_issuer_asset(testbed):
+    km = testbed.keymaster
+    alice, carol, victor, schema, _ = _parties(testbed)
+    original = _legacy_issue(km, run(km.bind_credential(carol, {"schema": schema})), carol, True)
+    run(km.set_current_id("Carol"))
+    plaintext = run(km.decrypt_message(original))
+    copy = run(km.encrypt_message(plaintext, carol, {"includeHash": True}))
+    run(km.set_current_id("Alice"))
+    run(km.revoke_did(original))
+
+    challenge = _challenge(km, [{"schema": schema, "issuers": [alice]}])
+    assert _present(km, victor, challenge, [{"vc": copy, "plaintext": plaintext}])["vps"] == []
+
+    # The issuer's own asset still verifies without an id.
+    run(km.set_current_id("Alice"))
+    kept = _legacy_issue(km, run(km.bind_credential(carol, {"schema": schema})), carol, True)
+    run(km.set_current_id("Carol"))
+    kept_plaintext = run(km.decrypt_message(kept))
+    assert _present(km, victor, challenge, [{"vc": kept, "plaintext": kept_plaintext}])["match"] is True
+
+
+def test_verify_response_requires_a_schema(testbed):
+    km = testbed.keymaster
+    alice, carol, victor, schema, _ = _parties(testbed)
+    bound = run(km.bind_credential(carol, {"schema": schema}))
+    bound.pop("credentialSchema", None)
+    vc = run(km.issue_credential(bound))
+    run(km.set_current_id("Carol"))
+    plaintext = run(km.decrypt_message(vc))
+
+    challenge = _challenge(km, [{"schema": schema, "issuers": [alice]}])
+    verified = _present(km, victor, challenge, [{"vc": vc, "plaintext": plaintext}])
+    assert verified["vps"] == []
+    assert verified["match"] is False
+
+
+def test_verify_response_satisfies_each_request_with_one_distinct_credential(testbed):
+    km = testbed.keymaster
+    alice, carol, victor, schema, other = _parties(testbed)
+    first = run(km.issue_credential(run(km.bind_credential(carol, {"schema": schema}))))
+    second = run(km.issue_credential(run(km.bind_credential(carol, {"schema": schema}))))
+    run(km.set_current_id("Carol"))
+    pair_1 = {"vc": first, "plaintext": run(km.decrypt_message(first))}
+    pair_2 = {"vc": second, "plaintext": run(km.decrypt_message(second))}
+
+    # Two credentials of one schema cannot stand in for a second schema.
+    mixed = _challenge(km, [{"schema": schema, "issuers": [alice]}, {"schema": other, "issuers": [alice]}])
+    partial = _present(km, victor, mixed, [pair_1, pair_2])
+    assert len(partial["vps"]) == 1
+    assert partial["match"] is False
+
+    # Two requests for one schema need two credentials, not one twice.
+    twice = _challenge(km, [{"schema": schema, "issuers": [alice]}, {"schema": schema, "issuers": [alice]}])
+    repeated = _present(km, victor, twice, [pair_1, pair_1])
+    assert len(repeated["vps"]) == 1
+    assert repeated["match"] is False
+
+    distinct = _present(km, victor, twice, [pair_1, pair_2])
+    assert len(distinct["vps"]) == 2
+    assert distinct["match"] is True
+
+
+def test_verify_response_requires_hashes_on_both_envelopes(testbed):
+    km = testbed.keymaster
+    alice, carol, victor, schema, _ = _parties(testbed)
+    bound = run(km.bind_credential(carol, {"schema": schema}))
+    vc = _legacy_issue(km, bound, carol, False)
+    run(km.set_current_id("Carol"))
+    original = run(km.decrypt_message(vc))
+
+    # Alice later replaces the content; the unhashed envelopes cannot show
+    # that the presented copy is the old one.
+    run(km.set_current_id("Alice"))
+    replaced = json.dumps(run(km.add_proof(
+        {**bound, "credentialSubject": {**bound["credentialSubject"], "email": "new@example.com"}}
+    )), separators=(",", ":"))
+    alice_public = run(km.fetch_key_pair())["publicJwk"]
+    carol_public = run(km.get_public_key_jwk(run(km.resolve_did(carol))))
+    run(km.update_did(vc, {"didDocumentData": {"encrypted": {
+        "cipher_hash": None,
+        "cipher_sender": encrypt_message(alice_public, replaced),
+        "cipher_receiver": encrypt_message(carol_public, replaced),
+    }}}))
+
+    challenge = _challenge(km, [{"schema": schema, "issuers": [alice]}])
+    verified = _present(km, victor, challenge, [{"vc": vc, "plaintext": original, "include_hash": False}])
     assert verified["vps"] == []

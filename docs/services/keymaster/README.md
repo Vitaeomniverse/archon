@@ -875,16 +875,21 @@ equals the credential's. Verification counts a presented credential only when:
 
 1. the credential and presentation both resolve to live encrypted assets
    (a revoked credential or presentation is not counted);
-2. their `cipher_hash` values are equal, binding the presentation to the
-   credential DID's current content;
-3. the decrypted presentation carries a valid proof from its issuer
-   (`verifyProof`) and a `type` array;
-4. if it names a `credentialSchema`, the challenge requests that schema and,
-   when the request lists `issuers`, includes the presentation's issuer.
+2. both carry a `cipher_hash` and the two are equal, binding the presentation
+   to the credential DID's current content;
+3. the decrypted presentation has a `type` array and a valid proof by its
+   `issuer` — a proof by any other key does not count;
+4. the credential lives at the DID presented for it: its signed `id` equals
+   that DID, or, for credentials issued before they carried an `id` (#948),
+   the issuer controls the credential asset. A holder therefore cannot copy a
+   revoked credential to a fresh asset;
+5. it names a `credentialSchema` that an unsatisfied challenge request asks
+   for and, when that request lists `issuers`, its issuer is among them.
 
-`vps` holds the credentials that pass, and `match` is whether their number
-equals the number of credentials the challenge requests. `requested` and
-`fulfilled` are the responder's own counts, returned as sent.
+Each request is satisfied by at most one credential, and each credential DID
+counts once. `vps` holds the credentials that pass, and `match` is whether
+every request is satisfied. `requested` and `fulfilled` are the responder's
+own counts, returned as sent.
 
 An entry whose `vc` or `vp` is not a DID string is not counted. Python
 keymasters before #1300 embedded the credential itself as `vp`; nothing binds

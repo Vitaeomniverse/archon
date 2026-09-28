@@ -1628,6 +1628,18 @@ export default class Keymaster implements KeymasterInterface {
         return false;
     }
 
+    // verifyProof accepts a proof by any resolvable key. This requires one by
+    // the given signer, as a credential's issuer must be.
+    private async verifyProofBy<T extends PossiblyProofed>(obj: T, signer: string): Promise<boolean> {
+        const proofs = proofsOf(obj).filter(proof => proof?.verificationMethod?.split('#')[0] === signer);
+
+        if (proofs.length === 0) {
+            return false;
+        }
+
+        return this.verifyProof({ ...obj, proof: proofs.length === 1 ? proofs[0] : proofs });
+    }
+
     async verifyProof<T extends PossiblyProofed>(obj: T): Promise<boolean> {
         const proofs = proofsOf(obj);
 
@@ -4791,16 +4803,20 @@ export default class Keymaster implements KeymasterInterface {
             throw new InvalidParameterError('challengeDID');
         }
 
+        const requests = challenge.credentials ?? [];
+        const satisfied = requests.map(() => false);
+        const presented = new Set<string>();
         const vps: unknown[] = [];
 
         for (let credential of response.credentials) {
             // Older Python responses embedded the credential itself, which
             // nothing binds to the credential DID it names.
-            if (typeof credential?.vc !== 'string' || typeof credential?.vp !== 'string') {
+            if (typeof credential?.vc !== 'string' || typeof credential?.vp !== 'string' || presented.has(credential.vc)) {
                 continue;
             }
 
-            const vcData = this.assetData(await resolve(credential.vc, 'credential'));
+            const vcDoc = await resolve(credential.vc, 'credential');
+            const vcData = this.assetData(vcDoc);
             const vpDoc = await resolve(credential.vp, 'presentation');
             const vpData = this.assetData(vpDoc);
 
@@ -4815,42 +4831,48 @@ export default class Keymaster implements KeymasterInterface {
             const vcHash = castVCData.encrypted;
             const vpHash = castVPData.encrypted;
 
-            if (vcHash.cipher_hash !== vpHash.cipher_hash) {
-                // can't verify that the contents of VP match the VC
+            // Without a hash on both, nothing shows the presentation carries
+            // the credential's current content.
+            if (!vcHash.cipher_hash || vcHash.cipher_hash !== vpHash.cipher_hash) {
                 continue;
             }
 
             const vp = await this.decryptResolvedJSON(vpDoc) as VerifiableCredential;
-            const isValid = await this.verifyProof(vp);
 
-            if (!isValid) {
+            if (!vp || typeof vp !== 'object' || !vp.type || !Array.isArray(vp.type)) {
                 continue;
             }
 
-            if (!vp.type || !Array.isArray(vp.type)) {
+            // Any key can sign; only a proof by the named issuer vouches for it.
+            if (typeof vp.issuer !== 'string' || !await this.verifyProofBy(vp, vp.issuer)) {
                 continue;
             }
 
-            // Check VP against VCs specified in challenge
-            if (vp.credentialSchema?.id) {
-                const schema = vp.credentialSchema.id;
-                const credential = challenge.credentials?.find(item => item.schema === schema);
-
-                if (!credential) {
-                    continue;
-                }
-
-                // Check if issuer of VP is in the trusted issuer list
-                if (credential.issuers && credential.issuers.length > 0 && !credential.issuers.includes(vp.issuer)) {
-                    continue;
-                }
+            // The credential must live at the DID presented for it, or a holder
+            // could copy a revoked one to a fresh asset. Credentials name their
+            // asset in `id` (#948); earlier ones are bound by the issuer
+            // controlling the asset.
+            if (vp.id !== undefined ? vp.id !== credential.vc : vcDoc.didDocument?.controller !== vp.issuer) {
+                continue;
             }
 
+            // Each request is satisfied by at most one credential, of its
+            // schema and, when it names issuers, from one of them.
+            const schema = vp.credentialSchema?.id;
+            const index = schema ? requests.findIndex((request, i) => !satisfied[i] && request.schema === schema &&
+                (!request.issuers?.length || request.issuers.includes(vp.issuer))) : -1;
+
+            if (index < 0) {
+                continue;
+            }
+
+            satisfied[index] = true;
+            presented.add(credential.vc);
             vps.push(vp);
         }
 
         response.vps = vps;
-        response.match = vps.length === (challenge.credentials?.length ?? 0);
+        response.match = satisfied.every(Boolean);
         response.responder = responseDoc.didDocument?.controller;
 
         return response;

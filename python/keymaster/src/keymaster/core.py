@@ -2100,6 +2100,17 @@ class Keymaster:
         # An unrecognised cryptosuite is somebody else's, not a failure of ours.
         return False
 
+    # verify_proof accepts a proof by any resolvable key. This requires one by
+    # the given signer, as a credential's issuer must be.
+    async def _verify_proof_by(self, payload: dict[str, Any], signer: str) -> bool:
+        proofs = [
+            proof for proof in _proofs_of(payload)
+            if isinstance(proof, dict) and str(proof.get("verificationMethod") or "").split("#")[0] == signer
+        ]
+        if not proofs:
+            return False
+        return await self.verify_proof({**payload, "proof": proofs[0] if len(proofs) == 1 else proofs})
+
     async def verify_proof(self, payload: dict[str, Any]) -> bool:
         proofs = _proofs_of(payload)
         if not proofs:
@@ -4140,15 +4151,23 @@ class Keymaster:
         if not isinstance(challenge, dict):
             raise KeymasterError("Invalid parameter: challengeDID")
         requests = challenge.get("credentials") if isinstance(challenge.get("credentials"), list) else []
+        satisfied = [False] * len(requests)
+        presented: set[str] = set()
         vps: list[Any] = []
 
         for entry in response.get("credentials") or []:
             # Responses from before presentation DIDs embedded the credential
             # itself, which nothing binds to the credential DID it names.
-            if not isinstance(entry, dict) or not isinstance(entry.get("vc"), str) or not isinstance(entry.get("vp"), str):
+            if (
+                not isinstance(entry, dict)
+                or not isinstance(entry.get("vc"), str)
+                or not isinstance(entry.get("vp"), str)
+                or entry["vc"] in presented
+            ):
                 continue
 
-            vc_data = self._asset_data(await resolve(entry["vc"], "credential"))
+            vc_doc = await resolve(entry["vc"], "credential")
+            vc_data = self._asset_data(vc_doc)
             vp_doc = await resolve(entry["vp"], "presentation")
             vp_data = self._asset_data(vp_doc)
             vc_encrypted = vc_data.get("encrypted") if isinstance(vc_data, dict) else None
@@ -4158,33 +4177,53 @@ class Keymaster:
                 # VC revoked
                 continue
 
-            if vc_encrypted.get("cipher_hash") != vp_encrypted.get("cipher_hash"):
-                # can't verify that the contents of VP match the VC
+            # Without a hash on both, nothing shows the presentation carries the
+            # credential's current content.
+            if not vc_encrypted.get("cipher_hash") or vc_encrypted.get("cipher_hash") != vp_encrypted.get("cipher_hash"):
                 continue
 
             vp = await self._decrypt_resolved_json(vp_doc)
-            if not isinstance(vp, dict) or not await self.verify_proof(vp):
+            if not isinstance(vp, dict) or not isinstance(vp.get("type"), list):
                 continue
 
-            if not isinstance(vp.get("type"), list):
+            # Any key can sign; only a proof by the named issuer vouches for it.
+            issuer = vp.get("issuer")
+            if not isinstance(issuer, str) or not await self._verify_proof_by(vp, issuer):
                 continue
 
-            # Check VP against VCs specified in challenge
-            schema = (vp.get("credentialSchema") or {}).get("id") if isinstance(vp.get("credentialSchema"), dict) else None
-            if schema:
-                request = next((item for item in requests if isinstance(item, dict) and item.get("schema") == schema), None)
-                if request is None:
+            # The credential must live at the DID presented for it, or a holder
+            # could copy a revoked one to a fresh asset. Credentials name their
+            # asset in `id` (#948); earlier ones are bound by the issuer
+            # controlling the asset.
+            if "id" in vp:
+                if vp["id"] != entry["vc"]:
                     continue
+            elif (vc_doc.get("didDocument") or {}).get("controller") != issuer:
+                continue
 
-                # Check if issuer of VP is in the trusted issuer list
-                issuers = request.get("issuers")
-                if isinstance(issuers, list) and issuers and vp.get("issuer") not in issuers:
-                    continue
+            # Each request is satisfied by at most one credential, of its schema
+            # and, when it names issuers, from one of them.
+            schema = vp.get("credentialSchema", {}).get("id") if isinstance(vp.get("credentialSchema"), dict) else None
+            index = next(
+                (
+                    i for i, request in enumerate(requests)
+                    if schema
+                    and not satisfied[i]
+                    and isinstance(request, dict)
+                    and request.get("schema") == schema
+                    and (not request.get("issuers") or issuer in request["issuers"])
+                ),
+                None,
+            )
+            if index is None:
+                continue
 
+            satisfied[index] = True
+            presented.add(entry["vc"])
             vps.append(vp)
 
         response["vps"] = vps
-        response["match"] = len(vps) == len(requests)
+        response["match"] = all(satisfied)
         response["responder"] = response_doc.get("didDocument", {}).get("controller")
         return response
 
