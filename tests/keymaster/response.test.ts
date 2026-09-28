@@ -607,7 +607,7 @@ describe('verifyResponse historical', () => {
             .rejects.toThrow('Invalid parameter: versionSequence requires versionTime');
         const malformed = ['yesterday', '0', '01/01/2026', '2026/09/01', '2026-09-01', '2026-09-01T00:15:00',
             '2026-02-29T00:00:00Z', '2026-04-31T00:00:00Z', '2026-09-01T24:00:00Z', '2026-09-01T00:00:60Z',
-            '2026-09-01T00:15:00+24:00'];
+            '2026-09-01T00:15:00+24:00', '0000-01-01T00:00:00Z'];
         for (const versionTime of malformed) {
             await expect(keymaster.verifyResponse(response, { versionTime }))
                 .rejects.toThrow('Invalid parameter: versionTime');

@@ -4695,7 +4695,7 @@ export default class Keymaster implements KeymasterInterface {
         const [, year, month, day, hour, minute, second, , , offsetHour, offsetMinute] = match.map(Number);
         const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
 
-        return month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth
+        return year >= 1 && month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth
             && hour <= 23 && minute <= 59 && second <= 59
             && (Number.isNaN(offsetHour) || (offsetHour <= 23 && offsetMinute <= 59));
     }

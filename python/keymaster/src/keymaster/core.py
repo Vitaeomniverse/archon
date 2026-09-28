@@ -4024,7 +4024,8 @@ class Keymaster:
         year, month, day, hour, minute, second = (int(part) for part in match.groups()[:6])
         offset_hour, offset_minute = match.group(9), match.group(10)
         return (
-            1 <= month <= 12
+            year >= 1
+            and 1 <= month <= 12
             and 1 <= day <= calendar.monthrange(year, month)[1]
             and hour <= 23 and minute <= 59 and second <= 59
             and (offset_hour is None or (int(offset_hour) <= 23 and int(offset_minute) <= 59))

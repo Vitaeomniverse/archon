@@ -271,7 +271,7 @@ def test_verify_response_rejects_malformed_selectors(testbed):
         run(km.verify_response(ctx["response"], {"versionSequence": 1}))
     malformed = ["yesterday", "0", "01/01/2026", "2026/09/01", "2026-09-01", "2026-09-01T00:15:00",
                  "2026-02-29T00:00:00Z", "2026-04-31T00:00:00Z", "2026-09-01T24:00:00Z", "2026-09-01T00:00:60Z",
-                 "2026-09-01T00:15:00+24:00"]
+                 "2026-09-01T00:15:00+24:00", "0000-01-01T00:00:00Z"]
     for version_time in malformed:
         with pytest.raises(KeymasterError, match="Invalid parameter: versionTime"):
             run(km.verify_response(ctx["response"], {"versionTime": version_time}))
