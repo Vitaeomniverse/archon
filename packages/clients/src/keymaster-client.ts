@@ -18,6 +18,7 @@ import {
     DmailMessage,
     FileAssetOptions,
     CreateResponseOptions,
+    VerifyResponseOptions,
     EncryptOptions,
     FileAsset,
     FixWalletResult,
@@ -1025,7 +1026,7 @@ export default class KeymasterClient implements KeymasterInterface {
 
     async verifyResponse(
         responseDID: string,
-        options?: { retries?: number; delay?: number }
+        options?: VerifyResponseOptions
     ): Promise<ChallengeResponse> {
         try {
             const response = await this.axios.post(`${this.API}/response/verify`, { response: responseDID, options });

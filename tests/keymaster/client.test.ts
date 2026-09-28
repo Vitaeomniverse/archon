@@ -2293,6 +2293,19 @@ describe('verifyResponse', () => {
         expect(verification).toStrictEqual(mockVerification);
     });
 
+    it('should send historical selectors in the request body', async () => {
+        const options = { versionTime: '2026-01-01T00:00:00Z', versionSequence: 2 };
+
+        nock(KeymasterURL)
+            .post(Endpoints.response_verify, { response: mockResponse, options })
+            .reply(200, { verify: mockVerification });
+
+        const keymaster = await KeymasterClient.create({ url: KeymasterURL });
+        const verification = await keymaster.verifyResponse(mockResponse, options);
+
+        expect(verification).toStrictEqual(mockVerification);
+    });
+
     it('should throw exception on verifyResponse server error', async () => {
         nock(KeymasterURL)
             .post(Endpoints.response_verify)

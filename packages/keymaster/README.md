@@ -210,7 +210,7 @@ It then uses `ARCHON_NODE_URL` and `ARCHON_PASSPHRASE` during setup, creates the
 | Challenges | `create-challenge [file]` | Create a challenge |
 | Challenges | `create-challenge-cc <did>` | Create challenge from credential |
 | Challenges | `create-response <challenge>` | Respond to a challenge |
-| Challenges | `verify-response <response>` | Verify a response |
+| Challenges | `verify-response <response> [-t time] [-s version]` | Verify a response, optionally as of an earlier time or response version |
 | Aliases | `add-alias <alias> <did>` | Add alias for DID |
 | Aliases | `get-alias <alias>` | Get DID by alias |
 | Aliases | `remove-alias <alias>` | Remove alias |

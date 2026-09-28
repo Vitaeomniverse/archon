@@ -57,6 +57,22 @@ class FakeGatekeeper:
         # Every operation as it was handed over, proof included, for tests about
         # what a wallet emits rather than what the gatekeeper makes of it.
         self.operations: list[dict[str, Any]] = []
+        # Each version as it was applied. Selectors are ignored, and the current
+        # version returned, unless a test opts in to historical resolution.
+        self.history: dict[str, list[dict[str, Any]]] = {}
+        self.historical = False
+        # When set, the time recorded for the next operations instead of the
+        # operation's own timestamp.
+        self.now: str | None = None
+
+    def _operation_time(self, operation: dict[str, Any], field: str | None) -> str:
+        if self.now:
+            return self.now
+        value = operation.get(field) if field == "created" else (operation.get("proof") or {}).get("created")
+        return value or datetime.now(timezone.utc).isoformat()
+
+    def _record(self, did: str) -> None:
+        self.history.setdefault(did, []).append(deepcopy(self.docs[did]))
 
     async def list_registries(self) -> list[str]:
         return list(self.registries)
@@ -108,24 +124,44 @@ class FakeGatekeeper:
             "didDocument": did_document,
             "didDocumentData": did_document_data,
             "didDocumentMetadata": {
-                "created": operation.get("created") or datetime.now(timezone.utc).isoformat(),
+                "created": self._operation_time(operation, "created"),
                 "versionId": f"{did}#1",
                 "versionSequence": 1,
                 "deactivated": False,
             },
             "didDocumentRegistration": registration,
         }
+        self._record(did)
 
         return did
 
     async def resolve_did(self, did: str, options: dict[str, Any] | None = None) -> dict[str, Any]:
-        _ = options
         if did not in self.docs:
             return {
                 "didResolutionMetadata": {"error": "notFound"},
                 "didDocumentMetadata": {},
             }
-        return deepcopy(self.docs[did])
+        options = options or {}
+        version_time = options.get("versionTime")
+        version_sequence = options.get("versionSequence")
+        if not self.historical or (not version_time and not version_sequence):
+            return deepcopy(self.docs[did])
+
+        # Like Gatekeeper: the create version is always returned, and a
+        # selector past the last version returns the last version.
+        def parse(value: str) -> datetime:
+            return datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+
+        versions = self.history[did]
+        selected = versions[0]
+        for number, version in enumerate(versions[1:], start=2):
+            metadata = version["didDocumentMetadata"]
+            if version_time and parse(metadata.get("deleted") or metadata["updated"]) > parse(version_time):
+                break
+            if version_sequence and number > int(version_sequence):
+                break
+            selected = version
+        return deepcopy(selected)
 
     async def update_did(self, operation: dict[str, Any]) -> bool:
         self.operations.append(deepcopy(operation))
@@ -155,8 +191,10 @@ class FakeGatekeeper:
         current["didDocumentMetadata"]["versionSequence"] = next_sequence
         current["didDocumentMetadata"]["versionId"] = f"{did}#{next_sequence}"
         current["didDocumentMetadata"].setdefault("created", datetime.now(timezone.utc).isoformat())
+        current["didDocumentMetadata"]["updated"] = self._operation_time(operation, None)
 
         self.docs[did] = current
+        self._record(did)
         return True
 
     async def delete_did(self, operation: dict[str, Any]) -> bool:
@@ -168,7 +206,10 @@ class FakeGatekeeper:
         current["didDocumentMetadata"]["deactivated"] = True
         current["didDocument"] = {"id": did}
         current["didDocumentData"] = {}
+        current["didDocumentMetadata"].pop("updated", None)
+        current["didDocumentMetadata"]["deleted"] = self._operation_time(operation, None)
         self.docs[did] = current
+        self._record(did)
         return True
 
     async def search(self, query: dict[str, Any]) -> list[str]:

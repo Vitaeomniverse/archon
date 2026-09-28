@@ -126,3 +126,136 @@ def test_verify_response_rejects_non_response_asset(testbed):
 
     with pytest.raises(KeymasterError, match="responseDID not a valid challenge response"):
         run(testbed.keymaster.verify_response(did))
+
+
+T0 = "2026-09-01T00:"
+
+
+def _at(minute: int) -> str:
+    return f"{T0}{minute:02d}:00.000Z"
+
+
+def _historical_response(testbed):
+    # Minute 0: Alice issues a credential to Carol. Minute 10: Victor
+    # challenges and Carol responds.
+    km = testbed.keymaster
+    testbed.gatekeeper.historical = True
+    testbed.gatekeeper.now = _at(0)
+    alice = run(km.create_id("Alice"))
+    carol = run(km.create_id("Carol"))
+    run(km.create_id("Victor"))
+
+    run(km.set_current_id("Alice"))
+    schema_did = run(km.create_schema(MOCK_SCHEMA))
+    bound = run(km.bind_credential(carol, {"schema": schema_did}))
+    vc_did = run(km.issue_credential(bound))
+    run(km.set_current_id("Carol"))
+    assert run(km.accept_credential(vc_did)) is True
+
+    testbed.gatekeeper.now = _at(10)
+    run(km.set_current_id("Victor"))
+    challenge_did = run(km.create_challenge({"credentials": [{"schema": schema_did, "issuers": [alice]}]}))
+    run(km.set_current_id("Carol"))
+    response_did = run(km.create_response(challenge_did))
+    return {"alice": alice, "carol": carol, "vc": vc_did, "challenge": challenge_did, "response": response_did}
+
+
+def _verify_at(testbed, response_did, minute=None, version_sequence=None):
+    run(testbed.keymaster.set_current_id("Victor"))
+    options = {} if minute is None else {"versionTime": _at(minute)}
+    if version_sequence is not None:
+        options["versionSequence"] = version_sequence
+    return run(testbed.keymaster.verify_response(response_did, options))
+
+
+def test_verify_response_historical_revocation(testbed):
+    ctx = _historical_response(testbed)
+
+    testbed.gatekeeper.now = _at(20)
+    run(testbed.keymaster.set_current_id("Alice"))
+    run(testbed.keymaster.revoke_credential(ctx["vc"]))
+
+    assert _verify_at(testbed, ctx["response"])["match"] is False
+
+    before = _verify_at(testbed, ctx["response"], 15)
+    assert before["match"] is True
+    assert [vp["vc"] for vp in before["vps"]] == [ctx["vc"]]
+    assert before["responder"] == ctx["carol"]
+
+    assert _verify_at(testbed, ctx["response"], 25)["match"] is False
+
+
+def test_verify_response_historical_challenge(testbed):
+    ctx = _historical_response(testbed)
+
+    testbed.gatekeeper.now = _at(20)
+    run(testbed.keymaster.set_current_id("Alice"))
+    extra = run(testbed.keymaster.create_schema(MOCK_SCHEMA))
+    run(testbed.keymaster.set_current_id("Victor"))
+    original = run(testbed.keymaster.resolve_asset(ctx["challenge"]))["challenge"]
+    run(testbed.keymaster.merge_data(ctx["challenge"], {
+        "challenge": {"credentials": [*original["credentials"], {"schema": extra, "issuers": [ctx["alice"]]}]},
+    }))
+
+    assert _verify_at(testbed, ctx["response"])["match"] is False
+    assert _verify_at(testbed, ctx["response"], 15)["match"] is True
+
+
+def test_verify_response_historical_response_version(testbed):
+    ctx = _historical_response(testbed)
+    km = testbed.keymaster
+
+    testbed.gatekeeper.now = _at(20)
+    run(km.set_current_id("Victor"))
+    empty = run(km.create_challenge({"credentials": []}))
+    run(km.set_current_id("Carol"))
+    other = run(km.create_response(empty))
+    data = run(km.resolve_did(other))["didDocumentData"]
+    run(km.update_did(ctx["response"], {"didDocumentData": data}))
+
+    assert _verify_at(testbed, ctx["response"])["challenge"] == empty
+    assert _verify_at(testbed, ctx["response"], 15)["challenge"] == ctx["challenge"]
+    assert _verify_at(testbed, ctx["response"], 25)["challenge"] == empty
+
+    first = _verify_at(testbed, ctx["response"], 30, 1)
+    assert first["challenge"] == ctx["challenge"]
+    assert first["match"] is True
+    assert _verify_at(testbed, ctx["response"], 30, 2)["challenge"] == empty
+
+    with pytest.raises(KeymasterError, match="Invalid parameter: responseDID version 2 is later than versionTime"):
+        _verify_at(testbed, ctx["response"], 15, 2)
+    with pytest.raises(KeymasterError, match="Invalid parameter: responseDID version 3 not found"):
+        _verify_at(testbed, ctx["response"], 30, 3)
+
+
+def test_verify_response_historical_refuses_cutoffs_before_creation(testbed):
+    ctx = _historical_response(testbed)
+    km = testbed.keymaster
+
+    with pytest.raises(KeymasterError, match="Invalid parameter: responseDID did not exist at versionTime"):
+        _verify_at(testbed, ctx["response"], 5)
+
+    # A response whose challenge was created after the cutoff.
+    testbed.gatekeeper.now = _at(20)
+    run(km.set_current_id("Victor"))
+    later = run(km.create_challenge())
+    victor = run(km.fetch_id_info())["did"]
+    testbed.gatekeeper.now = _at(10)
+    run(km.set_current_id("Carol"))
+    forged = run(km.encrypt_json({"response": {"challenge": later, "credentials": []}}, victor))
+
+    with pytest.raises(KeymasterError, match="Invalid parameter: challenge did not exist at versionTime"):
+        _verify_at(testbed, forged, 15)
+
+
+def test_verify_response_rejects_malformed_selectors(testbed):
+    ctx = _historical_response(testbed)
+    km = testbed.keymaster
+    run(km.set_current_id("Victor"))
+
+    with pytest.raises(KeymasterError, match="Invalid parameter: versionSequence requires versionTime"):
+        run(km.verify_response(ctx["response"], {"versionSequence": 1}))
+    with pytest.raises(KeymasterError, match="Invalid parameter: versionTime"):
+        run(km.verify_response(ctx["response"], {"versionTime": "yesterday"}))
+    with pytest.raises(KeymasterError, match="Invalid parameter: versionSequence"):
+        run(km.verify_response(ctx["response"], {"versionTime": _at(15), "versionSequence": 0}))

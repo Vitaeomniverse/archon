@@ -2738,9 +2738,11 @@ class Keymaster:
         return await self.create_asset({"encrypted": encrypted}, options)
 
     async def decrypt_message(self, did: str) -> str:
+        return await self._decrypt_resolved_message(await self.resolve_did(did))
+
+    async def _decrypt_resolved_message(self, msg_doc: dict[str, Any]) -> str:
         wallet = await self.load_wallet()
         id_info = await self.fetch_id_info()
-        msg_doc = await self.resolve_did(did)
         encrypted = (msg_doc.get("didDocumentData") or {}).get("encrypted") or (msg_doc.get("didDocumentData") or {})
         if not encrypted or "cipher_receiver" not in encrypted:
             raise KeymasterError("Invalid parameter: did not encrypted")
@@ -2770,6 +2772,9 @@ class Keymaster:
 
     async def decrypt_json(self, did: str) -> Any:
         return json.loads(await self.decrypt_message(did))
+
+    async def _decrypt_resolved_json(self, msg_doc: dict[str, Any]) -> Any:
+        return json.loads(await self._decrypt_resolved_message(msg_doc))
 
     async def create_schema(self, schema: Any | None = None, options: dict[str, Any] | None = None) -> str:
         schema = DEFAULT_SCHEMA if schema is None else schema
@@ -4001,14 +4006,92 @@ class Keymaster:
         }
         return await self.encrypt_json({"response": response}, requestor, options)
 
+    @staticmethod
+    def _parse_version_time(value: Any):
+        import datetime as dt
+
+        if not isinstance(value, str) or not value:
+            raise ValueError(value)
+        parsed = dt.datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.timezone.utc)
+        return parsed
+
+    # Resolves a DID read by historical response verification. Gatekeeper
+    # answers a cutoff before creation with the creation version and a
+    # sequence past the latest with the latest version; neither is the
+    # requested context, so both are refused rather than returned.
+    async def _resolve_historical(
+        self,
+        did: str,
+        label: str,
+        version_time: str,
+        version_sequence: int | None = None,
+    ) -> dict[str, Any]:
+        options = {"versionTime": version_time} if version_sequence is None else {"versionSequence": version_sequence}
+        doc = await self.resolve_did(did, options)
+        metadata = doc.get("didDocumentMetadata") or {}
+        cutoff = self._parse_version_time(version_time)
+
+        def after_cutoff(value: Any) -> bool:
+            try:
+                return self._parse_version_time(value) > cutoff
+            except ValueError:
+                return True
+
+        if version_sequence is not None:
+            if str(metadata.get("versionSequence")) != str(version_sequence):
+                raise KeymasterError(f"Invalid parameter: {label} version {version_sequence} not found")
+            selected = metadata.get("deleted") or metadata.get("updated") or metadata.get("created")
+            if after_cutoff(selected):
+                raise KeymasterError(f"Invalid parameter: {label} version {version_sequence} is later than versionTime")
+        elif after_cutoff(metadata.get("created")):
+            raise KeymasterError(f"Invalid parameter: {label} did not exist at versionTime")
+
+        return doc
+
     async def verify_response(self, response_did: str, options: dict[str, Any] | None = None) -> dict[str, Any]:
-        _ = options
-        response_doc = await self.resolve_did(response_did)
-        wrapper = await self.decrypt_json(response_did)
+        options = options or {}
+        retries = options.get("retries") or 0
+        delay = options.get("delay", 1000)
+        version_time = options.get("versionTime")
+        version_sequence = options.get("versionSequence")
+
+        if version_time is not None:
+            try:
+                self._parse_version_time(version_time)
+            except ValueError as exc:
+                raise KeymasterError("Invalid parameter: versionTime") from exc
+
+        if version_sequence is not None:
+            if isinstance(version_sequence, bool) or not isinstance(version_sequence, int) or version_sequence < 1:
+                raise KeymasterError("Invalid parameter: versionSequence")
+            # A response version does not determine when its references were
+            # checked, so the caller must name that context explicitly.
+            if version_time is None:
+                raise KeymasterError("Invalid parameter: versionSequence requires versionTime")
+
+        async def resolve(did: str, label: str, sequence: int | None = None) -> dict[str, Any]:
+            if version_time is None:
+                return await self.resolve_did(did)
+            return await self._resolve_historical(did, label, version_time, sequence)
+
+        while True:
+            try:
+                response_doc = await resolve(response_did, "responseDID", version_sequence)
+                break
+            except Exception:
+                if retries <= 0:
+                    raise
+                retries -= 1
+                await asyncio.sleep(delay / 1000)
+
+        wrapper = await self._decrypt_resolved_json(response_doc)
         if not isinstance(wrapper, dict) or "response" not in wrapper:
             raise KeymasterError("Invalid parameter: responseDID not a valid challenge response")
         response = deepcopy(wrapper["response"])
-        challenge_asset = await self.resolve_asset(response["challenge"])
+        challenge_doc = await resolve(response["challenge"], "challenge")
+        challenge_asset = {} if (challenge_doc.get("didDocumentMetadata") or {}).get("deactivated") else (challenge_doc.get("didDocumentData") or {})
         challenge = challenge_asset.get("challenge") or {}
         requests = challenge.get("credentials", []) if isinstance(challenge.get("credentials"), list) else []
         matched_vps = []
@@ -4018,20 +4101,23 @@ class Keymaster:
             if not isinstance(entry, dict) or not isinstance(entry.get("vc"), str):
                 continue
 
-            try:
-                credential_doc = await self.resolve_did(entry["vc"])
-                if credential_doc.get("didDocumentMetadata", {}).get("deactivated"):
+            if version_time is not None:
+                credential_doc = await resolve(entry["vc"], "credential")
+            else:
+                try:
+                    credential_doc = await self.resolve_did(entry["vc"])
+                except Exception:
                     continue
-            except Exception:
+            if credential_doc.get("didDocumentMetadata", {}).get("deactivated"):
                 continue
 
             credential = entry.get("vp") if isinstance(entry.get("vp"), dict) else None
             if not credential:
                 try:
-                    credential = await self.get_credential(entry["vc"])
+                    decrypted = await self._decrypt_resolved_json(credential_doc)
+                    credential = decrypted if self.is_verifiable_credential(decrypted) else None
                 except Exception:
                     credential = None
-
             if not credential:
                 continue
 

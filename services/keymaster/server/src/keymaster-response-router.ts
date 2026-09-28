@@ -98,6 +98,10 @@ export function createResponseRouter(options: CreateKeymasterRouterOptions): exp
      * /response/verify:
      *   post:
      *     summary: Verify a response to a challenge.
+     *     description: >
+     *       Without `versionTime`, verifies against the current state of every DID involved. With it, verifies the response
+     *       as it stood at that time, so a response checked after a credential revocation can still be audited as of an
+     *       earlier point.
      *     requestBody:
      *       required: true
      *       content:
@@ -123,16 +127,20 @@ export function createResponseRouter(options: CreateKeymasterRouterOptions): exp
      *                   versionTime:
      *                     type: string
      *                     format: date-time
-     *                     description: If provided, attempts to resolve the response DID as of a specific point in time.
+     *                     description: >
+     *                       Verify in the context of this time. The response, challenge, credential, and presentation DIDs,
+     *                       including the documents decrypted during verification, are resolved as of this time. A DID that
+     *                       did not exist by then is an error rather than a fallback to its current state. Proof keys keep
+     *                       their existing selection: each signer is resolved at its proof's `created` time. The time
+     *                       describes the verification context; it is not by itself evidence that an external action
+     *                       happened then.
      *                   versionSequence:
      *                     type: integer
-     *                     description: If provided, attempts to resolve the response DID at a specific version.
-     *                   confirm:
-     *                     type: boolean
-     *                     description: If true, only returns the DID if it is fully confirmed on its registry.
-     *                   verify:
-     *                     type: boolean
-     *                     description: If true, verifies the proof(s) of the response operation(s) before returning the DID Document.
+     *                     minimum: 1
+     *                     description: >
+     *                       Verify this version of the response DID. Requires `versionTime`, which must not precede the
+     *                       selected version and still selects the context of the DIDs the response references. A version
+     *                       the response does not have is an error.
      *     responses:
      *       200:
      *         description: The result of the verification process.

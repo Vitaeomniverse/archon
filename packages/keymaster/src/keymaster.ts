@@ -42,6 +42,7 @@ import {
     EncryptedMessage,
     FileAssetOptions,
     CreateResponseOptions,
+    VerifyResponseOptions,
     DmailItem,
     DmailMessage,
     EncryptOptions,
@@ -1204,10 +1205,13 @@ export default class Keymaster implements KeymasterInterface {
     }
 
     async decryptMessage(did: string): Promise<string> {
+        return this.decryptResolvedMessage(await this.resolveDID(did));
+    }
+
+    private async decryptResolvedMessage(msgDoc: DidCidDocument): Promise<string> {
         const wallet = await this.loadWallet();
         const id = await this.fetchIdInfo();
 
-        const msgDoc = await this.resolveDID(did);
         const asset = msgDoc.didDocumentData;
 
         if (!asset) {
@@ -1247,8 +1251,14 @@ export default class Keymaster implements KeymasterInterface {
     }
 
     async decryptJSON(did: string): Promise<unknown> {
-        const plaintext = await this.decryptMessage(did);
+        return this.parseDecryptedJSON(await this.decryptMessage(did));
+    }
 
+    private async decryptResolvedJSON(msgDoc: DidCidDocument): Promise<unknown> {
+        return this.parseDecryptedJSON(await this.decryptResolvedMessage(msgDoc));
+    }
+
+    private parseDecryptedJSON(plaintext: string): unknown {
         try {
             return JSON.parse(plaintext);
         }
@@ -2024,8 +2034,10 @@ export default class Keymaster implements KeymasterInterface {
     }
 
     async resolveAsset(did: string, options?: ResolveDIDOptions): Promise<any> {
-        const doc = await this.resolveDID(did, options);
+        return this.assetData(await this.resolveDID(did, options));
+    }
 
+    private assetData(doc: DidCidDocument): any {
         if (!doc?.didDocument?.controller || !doc?.didDocumentData || doc.didDocumentMetadata?.deactivated) {
             return {};
         }
@@ -4669,17 +4681,70 @@ export default class Keymaster implements KeymasterInterface {
         return await this.encryptJSON({ response }, requestor!, options);
     }
 
+    // Resolves a DID read by historical response verification. Gatekeeper
+    // answers a cutoff before creation with the creation version and a
+    // sequence past the latest with the latest version; neither is the
+    // requested context, so both are refused rather than returned.
+    private async resolveHistorical(
+        did: string,
+        label: string,
+        versionTime: string,
+        versionSequence?: number
+    ): Promise<DidCidDocument> {
+        const doc = await this.resolveDID(did, versionSequence === undefined ? { versionTime } : { versionSequence });
+        const metadata = doc.didDocumentMetadata;
+        const cutoff = Date.parse(versionTime);
+
+        if (versionSequence !== undefined) {
+            if (metadata?.versionSequence !== String(versionSequence)) {
+                throw new InvalidParameterError(`${label} version ${versionSequence} not found`);
+            }
+
+            const selected = metadata.deleted ?? metadata.updated ?? metadata.created;
+
+            if (!selected || Date.parse(selected) > cutoff) {
+                throw new InvalidParameterError(`${label} version ${versionSequence} is later than versionTime`);
+            }
+        }
+        else if (!metadata?.created || Date.parse(metadata.created) > cutoff) {
+            throw new InvalidParameterError(`${label} did not exist at versionTime`);
+        }
+
+        return doc;
+    }
+
     async verifyResponse(
         responseDID: string,
-        options: { retries?: number; delay?: number } = {}
+        options: VerifyResponseOptions = {}
     ): Promise<ChallengeResponse> {
         let { retries = 0, delay = 1000 } = options;
+        const { versionTime, versionSequence } = options;
+
+        if (versionTime !== undefined && (typeof versionTime !== 'string' || Number.isNaN(Date.parse(versionTime)))) {
+            throw new InvalidParameterError('versionTime');
+        }
+
+        if (versionSequence !== undefined) {
+            if (!Number.isInteger(versionSequence) || versionSequence < 1) {
+                throw new InvalidParameterError('versionSequence');
+            }
+
+            // A response version does not determine when its references were
+            // checked, so the caller must name that context explicitly.
+            if (versionTime === undefined) {
+                throw new InvalidParameterError('versionSequence requires versionTime');
+            }
+        }
+
+        const resolve = (did: string, label: string, sequence?: number) => versionTime === undefined
+            ? this.resolveDID(did)
+            : this.resolveHistorical(did, label, versionTime, sequence);
 
         let responseDoc;
 
         while (retries >= 0) {
             try {
-                responseDoc = await this.resolveDID(responseDID);
+                responseDoc = await resolve(responseDID, 'responseDID', versionSequence);
                 break;
             } catch (error) {
                 if (retries === 0) throw error; // If no retries left, throw the error
@@ -4691,13 +4756,13 @@ export default class Keymaster implements KeymasterInterface {
             throw new InvalidParameterError('responseDID does not resolve');
         }
 
-        const wrapper = await this.decryptJSON(responseDID);
+        const wrapper = await this.decryptResolvedJSON(responseDoc);
         if (typeof wrapper !== 'object' || !wrapper || !('response' in wrapper)) {
             throw new InvalidParameterError('responseDID not a valid challenge response');
         }
         const { response } = wrapper as { response: ChallengeResponse };
 
-        const result = await this.resolveAsset(response.challenge);
+        const result = this.assetData(await resolve(response.challenge, 'challenge'));
         if (!result) {
             throw new InvalidParameterError('challenge not found');
         }
@@ -4710,8 +4775,9 @@ export default class Keymaster implements KeymasterInterface {
         const vps: unknown[] = [];
 
         for (let credential of response.credentials) {
-            const vcData = await this.resolveAsset(credential.vc);
-            const vpData = await this.resolveAsset(credential.vp);
+            const vcData = this.assetData(await resolve(credential.vc, 'credential'));
+            const vpDoc = await resolve(credential.vp, 'presentation');
+            const vpData = this.assetData(vpDoc);
 
             const castVCData = vcData as { encrypted?: EncryptedMessage };
             const castVPData = vpData as { encrypted?: EncryptedMessage };
@@ -4729,7 +4795,7 @@ export default class Keymaster implements KeymasterInterface {
                 continue;
             }
 
-            const vp = await this.decryptJSON(credential.vp) as VerifiableCredential;
+            const vp = await this.decryptResolvedJSON(vpDoc) as VerifiableCredential;
             const isValid = await this.verifyProof(vp);
 
             if (!isValid) {

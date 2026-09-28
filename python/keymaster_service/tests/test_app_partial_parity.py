@@ -1119,7 +1119,7 @@ def test_schema_group_response_and_vault_option_handlers(stub_service: StubServi
     challenge = run(app_module.challenge_get())
     posted_challenge = run(app_module.challenge_post({"challenge": {"credentials": []}, "options": {"registry": "local"}}))
     response = run(app_module.response_post({"challenge": "did:test:challenge", "options": {"registry": "local"}}))
-    verified = run(app_module.response_verify({"response": "did:test:response", "options": {"retries": 1}}))
+    verified = run(app_module.response_verify({"response": "did:test:response", "options": {"retries": 1, "versionTime": "2026-01-01T00:00:00Z", "versionSequence": 2}}))
     vault = run(app_module.get_vault("did:test:vault", app_module.Request(query_params={"confirm": "true"})))
     tested_vault = run(app_module.test_vault("did:test:vault", {"options": {"confirm": True}}))
     listed_items = run(app_module.list_vault_items("did:test:vault", app_module.Request(query_params={"confirm": "true"})))
@@ -1162,7 +1162,7 @@ def test_schema_group_response_and_vault_option_handlers(stub_service: StubServi
         ("create_challenge", {}, {}),
         ("create_challenge", {"credentials": []}, {"registry": "local"}),
         ("create_response", "did:test:challenge", {"registry": "local"}),
-        ("verify_response", "did:test:response", {"retries": 1}),
+        ("verify_response", "did:test:response", {"retries": 1, "versionTime": "2026-01-01T00:00:00Z", "versionSequence": 2}),
         ("get_vault", "did:test:vault", {"confirm": "true"}),
         ("test_vault", "did:test:vault", {"confirm": True}),
         ("list_vault_items", "did:test:vault", {"confirm": "true"}),
