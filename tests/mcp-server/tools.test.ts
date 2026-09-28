@@ -473,6 +473,24 @@ describe('mcp server tools', () => {
         );
     });
 
+    it('passes historical selectors to verifyResponse only when supplied', async () => {
+        const server = new FakeServer();
+        const runtime = mockRuntime();
+        registerArchonTools(server, runtime as any, baseConfig);
+        const verify = server.tools.get('archon_verify_response')!.handler;
+
+        expectOk(await verify({ response: 'did:cid:response' }));
+        expect(runtime.keymaster.verifyResponse).toHaveBeenLastCalledWith('did:cid:response', undefined);
+
+        expectOk(await verify({ response: 'did:cid:response', versionTime: '2026-01-01T00:00:00Z', versionSequence: 2 }));
+        expect(runtime.keymaster.verifyResponse).toHaveBeenLastCalledWith(
+            'did:cid:response',
+            { versionTime: '2026-01-01T00:00:00Z', versionSequence: 2 }
+        );
+
+        expect(expectFail(await verify({ response: 'did:cid:response', versionSequence: 0 }))).toMatch(/versionSequence/);
+    });
+
     // Zod strips unknown keys on parse, so a schema that omits an extension point does not
     // reject data -- it silently deletes it. These two tools carry types that declare
     // `[key: string]: any`, and losing those keys would corrupt a restored wallet or erase

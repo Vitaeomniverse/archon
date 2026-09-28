@@ -642,7 +642,12 @@ async def cmd_create_response(km: Keymaster, args: argparse.Namespace) -> None:
 
 
 async def cmd_verify_response(km: Keymaster, args: argparse.Namespace) -> None:
-    _print_json(await km.verify_response(args.response))
+    opts: dict[str, Any] = {}
+    if args.version_time is not None:
+        opts["versionTime"] = args.version_time
+    if args.version_sequence is not None:
+        opts["versionSequence"] = args.version_sequence
+    _print_json(await km.verify_response(args.response, opts or None))
 
 
 # Credentials -----------------------------------------------------------------
@@ -1492,6 +1497,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("challenge")
     sp = add("verify-response", "Decrypt and validate a response to a challenge", cmd_verify_response)
     sp.add_argument("response")
+    sp.add_argument("-t", "--version-time", help="verify as of this RFC 3339 time, with offset")
+    sp.add_argument("-s", "--version-sequence", type=int, help="verify this response version (requires --version-time)")
 
     # Credentials
     sp = add("bind-credential", "Create bound credential for a user", cmd_bind_credential)

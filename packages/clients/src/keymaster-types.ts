@@ -200,6 +200,17 @@ export interface CreateResponseOptions {
     delay?: number;
 }
 
+export interface VerifyResponseOptions {
+    retries?: number;
+    delay?: number;
+    // Verification context: every DID the verification reads is resolved as
+    // of this time.
+    versionTime?: string;
+    // Version of the response DID to verify. Requires versionTime, which
+    // still selects the context of the DIDs the response references.
+    versionSequence?: number;
+}
+
 export interface PollResults {
     tally: Array<{
         vote: number;
@@ -579,7 +590,7 @@ export interface KeymasterInterface {
     // Challenges
     createChallenge(challenge?: Challenge, options?: { registry?: string; validUntil?: string }): Promise<string>;
     createResponse(challengeDid: string, options?: CreateResponseOptions): Promise<string>;
-    verifyResponse(responseDid: string, options?: { retries?: number; delay?: number }): Promise<ChallengeResponse>;
+    verifyResponse(responseDid: string, options?: VerifyResponseOptions): Promise<ChallengeResponse>;
 
     // Polls
     pollTemplate(): Promise<PollConfig>;

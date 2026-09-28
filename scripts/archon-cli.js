@@ -768,9 +768,15 @@ program
 program
     .command('verify-response <response>')
     .description('Decrypt and validate a response to a challenge')
-    .action(async (response) => {
+    .option('-t, --version-time <time>', 'verify as of this RFC 3339 time, with offset')
+    .option('-s, --version-sequence <version>', 'verify this response version (requires --version-time)')
+    .action(async (response, options) => {
         try {
-            const vp = await keymaster.verifyResponse(response);
+            const { versionTime, versionSequence } = options;
+            const vp = await keymaster.verifyResponse(response, {
+                versionTime,
+                versionSequence: versionSequence === undefined ? undefined : Number(versionSequence),
+            });
             console.log(JSON.stringify(vp, null, 4));
         }
         catch (error) {

@@ -843,7 +843,7 @@ verifier-prover protocol:
 | `GET /api/v1/challenge` | Creates a challenge asset using default parameters and returns `{ "did": string }`. There is no separate template-returning HTTP route in the current TS server. |
 | `POST /api/v1/challenge` | Body: `{ "challenge"?: Challenge, "options"?: { registry?, validUntil? } }`. Persists the challenge as an asset DID and returns `{ "did": string }`. |
 | `POST /api/v1/response` | Body: `{ "challenge": string, "options"?: CreateResponseOptions }`. Holder gathers matching held credentials, builds a `ChallengeResponse`, encrypts to the challenger, and creates a response asset. Returns `{ "did": string }`. |
-| `POST /api/v1/response/verify` | Body: `{ "response": string, "options"?: { retries?, delay? } }`. Verifier decrypts, validates each presented VC's signature against its issuer's key, and returns `{ "verify": ChallengeResponse }`. |
+| `POST /api/v1/response/verify` | Body: `{ "response": string, "options"?: { retries?, delay?, versionTime?, versionSequence? } }`. Verifier decrypts, validates each presented VC's signature against its issuer's key, and returns `{ "verify": ChallengeResponse }`. See [§9.4](#94-historical-response-verification) for the version selectors. |
 
 `Challenge`:
 
@@ -868,6 +868,68 @@ verifier-prover protocol:
   "responder": "<DID>"
 }
 ```
+
+### 9.4 Historical response verification
+
+By default `verifyResponse` checks the current state of every DID involved, so
+a response that verified before its credential was revoked fails afterward.
+The `versionTime` and `versionSequence` options verify the response as it
+stood at an earlier point instead, using Gatekeeper's existing historical
+resolution.
+
+| Option | Meaning |
+| --- | --- |
+| `versionTime` | RFC 3339 date-time with an offset (for example `2026-09-01T00:15:00Z`) that sets the verification context. Other date formats, times without an offset, and impossible dates are rejected. The response, its challenge, and each credential and presentation DID — including the documents decrypted during verification — are resolved as of this time. |
+| `versionSequence` | Version of the **response** DID to verify. It requires `versionTime`: a response version says nothing about when its references were checked, so `versionTime` still selects the context of the challenge, credential and presentation DIDs, and must not precede the selected response version. |
+
+Historical reads never fall back to current state. A DID created after
+`versionTime`, a response version later than `versionTime`, or a
+`versionSequence` the response does not have is an `Invalid parameter` error.
+Gatekeeper reports `created`, `updated` and `deleted` to the second, and
+Keymaster's own checks — whether a DID existed by `versionTime`, and whether the
+selected response version precedes it — compare those reported times. A
+cutoff inside the same second as a creation or the selected response version
+is therefore treated as including it. Gatekeeper applies `versionTime` to each
+DID's later updates at full precision.
+
+Proof-key selection is unchanged: each credential signature is still checked
+against the issuer's key at the proof's `created` time, and each encrypted
+document against its sender's key at the document's creation. Selecting a
+credential-status cutoff does not move those.
+
+For chain-registered DIDs, each update's time is its anchoring block's time
+once the anchor is imported, so a revocation takes effect at the block that
+recorded it. Before the anchor arrives, the revocation's own signed time bounds
+it.
+
+A caller-selected `versionTime` describes the verification context. It is not
+by itself evidence that an external action — an access grant, a login — happened
+then; establishing that timing, and having the relevant chain history
+available, remains the caller's responsibility.
+
+```bash
+# Current state
+keymaster verify-response did:cid:bagaaiera...
+# As of a past time
+keymaster verify-response did:cid:bagaaiera... --version-time 2026-09-01T00:15:00Z
+# Response version 1, with references as of that time
+keymaster verify-response did:cid:bagaaiera... -t 2026-09-01T00:15:00Z -s 1
+```
+
+```ts
+await keymaster.verifyResponse(responseDid, { versionTime: '2026-09-01T00:15:00Z' });
+```
+
+```python
+keymaster.verify_response(response_did, {"versionTime": "2026-09-01T00:15:00Z"})
+```
+
+The Python keymaster currently embeds each presented credential in the
+encrypted response rather than creating a separate presentation DID, so its
+historical selector applies to the response, challenge and credential reads.
+The credential read decides only whether the credential was revoked: the
+embedded copy is not compared with the credential's content, so a credential
+update does not change a Python verification (#1300).
 
 ---
 
