@@ -2391,6 +2391,17 @@ class Keymaster:
         clone_data = {**asset_data, "cloned": asset_doc.get("didDocument", {}).get("id")}
         return await self.create_asset(clone_data, options or {})
 
+    @staticmethod
+    def _asset_data(doc: dict[str, Any]) -> Any:
+        # Matches TypeScript assetData: only a live, controlled asset has data.
+        if (
+            not (doc.get("didDocument") or {}).get("controller")
+            or not doc.get("didDocumentData")
+            or (doc.get("didDocumentMetadata") or {}).get("deactivated")
+        ):
+            return {}
+        return doc["didDocumentData"]
+
     async def resolve_asset(self, did: str, options: dict[str, Any] | None = None) -> Any:
         doc = await self.resolve_did(did, options)
         if doc.get("didDocumentMetadata", {}).get("deactivated"):
@@ -3993,17 +4004,26 @@ class Keymaster:
                     credential = None
 
                 if credential and self.credential_matches_request(credential, request):
-                    matched_credentials.append({"vc": credential_did, "vp": credential})
+                    matched_credentials.append(credential_did)
                     used_credentials.add(credential_did)
                     break
+
+        # Each presentation re-encrypts the credential's exact plaintext to the
+        # requestor, so its cipher_hash matches the credential's and the
+        # verifier can bind one to the other.
+        pairs = []
+        for credential_did in matched_credentials:
+            plaintext = await self.decrypt_message(credential_did)
+            presentation_did = await self.encrypt_message(plaintext, requestor, {**options, "includeHash": True})
+            pairs.append({"vc": credential_did, "vp": presentation_did})
 
         requested = len(requests)
         response = {
             "challenge": challenge_did,
-            "credentials": matched_credentials,
+            "credentials": pairs,
             "requested": requested,
-            "fulfilled": len(matched_credentials),
-            "match": requested == len(matched_credentials),
+            "fulfilled": len(pairs),
+            "match": requested == len(pairs),
         }
         return await self.encrypt_json({"response": response}, requestor, options)
 
@@ -4115,50 +4135,56 @@ class Keymaster:
             raise KeymasterError("Invalid parameter: responseDID not a valid challenge response")
         response = deepcopy(wrapper["response"])
         challenge_doc = await resolve(response["challenge"], "challenge")
-        challenge_asset = {} if (challenge_doc.get("didDocumentMetadata") or {}).get("deactivated") else (challenge_doc.get("didDocumentData") or {})
-        challenge = challenge_asset.get("challenge")
+        challenge_asset = self._asset_data(challenge_doc)
+        challenge = challenge_asset.get("challenge") if isinstance(challenge_asset, dict) else None
         if not isinstance(challenge, dict):
             raise KeymasterError("Invalid parameter: challengeDID")
-        requests = challenge.get("credentials", []) if isinstance(challenge.get("credentials"), list) else []
-        matched_vps = []
-        satisfied = [False] * len(requests)
+        requests = challenge.get("credentials") if isinstance(challenge.get("credentials"), list) else []
+        vps: list[Any] = []
 
-        for entry in response.get("credentials", []):
-            if not isinstance(entry, dict) or not isinstance(entry.get("vc"), str):
+        for entry in response.get("credentials") or []:
+            # Responses from before presentation DIDs embedded the credential
+            # itself, which nothing binds to the credential DID it names.
+            if not isinstance(entry, dict) or not isinstance(entry.get("vc"), str) or not isinstance(entry.get("vp"), str):
                 continue
 
-            if version_time is not None:
-                credential_doc = await resolve(entry["vc"], "credential")
-            else:
-                try:
-                    credential_doc = await self.resolve_did(entry["vc"])
-                except Exception:
+            vc_data = self._asset_data(await resolve(entry["vc"], "credential"))
+            vp_doc = await resolve(entry["vp"], "presentation")
+            vp_data = self._asset_data(vp_doc)
+            vc_encrypted = vc_data.get("encrypted") if isinstance(vc_data, dict) else None
+            vp_encrypted = vp_data.get("encrypted") if isinstance(vp_data, dict) else None
+
+            if not isinstance(vc_encrypted, dict) or not isinstance(vp_encrypted, dict):
+                # VC revoked
+                continue
+
+            if vc_encrypted.get("cipher_hash") != vp_encrypted.get("cipher_hash"):
+                # can't verify that the contents of VP match the VC
+                continue
+
+            vp = await self._decrypt_resolved_json(vp_doc)
+            if not isinstance(vp, dict) or not await self.verify_proof(vp):
+                continue
+
+            if not isinstance(vp.get("type"), list):
+                continue
+
+            # Check VP against VCs specified in challenge
+            schema = (vp.get("credentialSchema") or {}).get("id") if isinstance(vp.get("credentialSchema"), dict) else None
+            if schema:
+                request = next((item for item in requests if isinstance(item, dict) and item.get("schema") == schema), None)
+                if request is None:
                     continue
-            if credential_doc.get("didDocumentMetadata", {}).get("deactivated"):
-                continue
 
-            credential = entry.get("vp") if isinstance(entry.get("vp"), dict) else None
-            if not credential:
-                try:
-                    decrypted = await self._decrypt_resolved_json(credential_doc)
-                    credential = decrypted if self.is_verifiable_credential(decrypted) else None
-                except Exception:
-                    credential = None
-            if not credential:
-                continue
-
-            for index, request in enumerate(requests):
-                if satisfied[index] or not isinstance(request, dict):
+                # Check if issuer of VP is in the trusted issuer list
+                issuers = request.get("issuers")
+                if isinstance(issuers, list) and issuers and vp.get("issuer") not in issuers:
                     continue
-                if self.credential_matches_request(credential, request):
-                    matched_vps.append({"vc": entry["vc"], "vp": credential})
-                    satisfied[index] = True
-                    break
 
-        response["vps"] = matched_vps
-        response["requested"] = len(requests)
-        response["fulfilled"] = len(matched_vps)
-        response["match"] = len(matched_vps) == len(requests)
+            vps.append(vp)
+
+        response["vps"] = vps
+        response["match"] = len(vps) == len(requests)
         response["responder"] = response_doc.get("didDocument", {}).get("controller")
         return response
 

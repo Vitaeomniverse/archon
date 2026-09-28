@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from copy import deepcopy
+import json
+
 import pytest
 
 from keymaster import KeymasterError, UnknownIDError
@@ -116,7 +119,6 @@ def test_verify_response_accepts_updated_credentials_and_detects_revocation(test
     run(testbed.keymaster.set_current_id("Victor"))
     revoked = run(testbed.keymaster.verify_response(response_did))
     assert revoked["match"] is False
-    assert revoked["fulfilled"] == 0
     assert revoked["vps"] == []
 
 
@@ -179,7 +181,7 @@ def test_verify_response_historical_revocation(testbed):
 
     before = _verify_at(testbed, ctx["response"], 15)
     assert before["match"] is True
-    assert [vp["vc"] for vp in before["vps"]] == [ctx["vc"]]
+    assert [vp["credentialSubject"]["id"] for vp in before["vps"]] == [ctx["carol"]]
     assert before["responder"] == ctx["carol"]
 
     assert _verify_at(testbed, ctx["response"], 25)["match"] is False
@@ -279,3 +281,105 @@ def test_verify_response_rejects_malformed_selectors(testbed):
         assert run(km.verify_response(ctx["response"], {"versionTime": version_time}))["match"] is True
     with pytest.raises(KeymasterError, match="Invalid parameter: versionSequence"):
         run(km.verify_response(ctx["response"], {"versionTime": _at(15), "versionSequence": 0}))
+
+
+def test_create_response_binds_each_presentation_to_its_credential(testbed):
+    ctx = _historical_response(testbed)
+    km = testbed.keymaster
+
+    run(km.set_current_id("Victor"))
+    response = run(km.decrypt_json(ctx["response"]))["response"]
+    [entry] = response["credentials"]
+    assert entry["vc"] == ctx["vc"]
+    assert isinstance(entry["vp"], str) and entry["vp"] != ctx["vc"]
+
+    vc_hash = run(km.resolve_asset(entry["vc"]))["encrypted"]["cipher_hash"]
+    vp_hash = run(km.resolve_asset(entry["vp"]))["encrypted"]["cipher_hash"]
+    assert vc_hash and vc_hash == vp_hash
+    assert run(km.decrypt_json(entry["vp"]))["credentialSubject"]["id"] == ctx["carol"]
+
+
+def test_verify_response_historical_credential_update(testbed):
+    ctx = _historical_response(testbed)
+    km = testbed.keymaster
+
+    testbed.gatekeeper.now = _at(20)
+    run(km.set_current_id("Alice"))
+    updated = run(km.get_credential(ctx["vc"]))
+    updated["credentialSubject"]["email"] = "updated@email.com"
+    assert run(km.update_credential(ctx["vc"], updated)) is True
+
+    # The presentation no longer matches the updated credential.
+    assert _verify_at(testbed, ctx["response"])["match"] is False
+    assert _verify_at(testbed, ctx["response"], 15)["match"] is True
+    assert _verify_at(testbed, ctx["response"], 25)["match"] is False
+
+
+def test_verify_response_historical_presentation(testbed):
+    ctx = _historical_response(testbed)
+    km = testbed.keymaster
+
+    run(km.set_current_id("Victor"))
+    [entry] = run(km.decrypt_json(ctx["response"]))["response"]["credentials"]
+
+    testbed.gatekeeper.now = _at(20)
+    run(km.set_current_id("Carol"))
+    assert run(km.revoke_did(entry["vp"])) is True
+
+    assert _verify_at(testbed, ctx["response"])["match"] is False
+    assert _verify_at(testbed, ctx["response"], 15)["match"] is True
+    assert _verify_at(testbed, ctx["response"], 25)["match"] is False
+
+
+def test_verify_response_rejects_a_credential_without_a_valid_issuer_proof(testbed):
+    km = testbed.keymaster
+    alice = run(km.create_id("Alice"))
+    carol = run(km.create_id("Carol"))
+    victor = run(km.create_id("Victor"))
+
+    run(km.set_current_id("Alice"))
+    schema_did = run(km.create_schema(MOCK_SCHEMA))
+    bound = run(km.bind_credential(carol, {"schema": schema_did}))
+    genuine = run(km.get_credential(run(km.issue_credential(bound))))
+
+    # Carol claims Alice issued a credential Alice never signed. The
+    # presentation's hash matches the credential DID, so only the proof check
+    # can reject it.
+    run(km.set_current_id("Carol"))
+    forged = deepcopy(genuine)
+    forged["credentialSubject"]["email"] = "forged@example.com"
+    plaintext = json.dumps(forged, separators=(",", ":"))
+    vc_did = run(km.encrypt_message(plaintext, carol, {"includeHash": True}))
+
+    run(km.set_current_id("Victor"))
+    challenge_did = run(km.create_challenge({"credentials": [{"schema": schema_did, "issuers": [alice]}]}))
+
+    run(km.set_current_id("Carol"))
+    vp_did = run(km.encrypt_message(plaintext, victor, {"includeHash": True}))
+    response = {"challenge": challenge_did, "credentials": [{"vc": vc_did, "vp": vp_did}],
+                "requested": 1, "fulfilled": 1, "match": True}
+    response_did = run(km.encrypt_json({"response": response}, victor))
+
+    run(km.set_current_id("Victor"))
+    verified = run(km.verify_response(response_did))
+    assert verified["match"] is False
+    assert verified["vps"] == []
+
+
+def test_verify_response_does_not_count_legacy_inline_credentials(testbed):
+    # Before presentation DIDs, Python responses embedded the credential
+    # itself. Nothing binds that copy to the credential DID, so it is not
+    # counted; such responses are short-lived (validUntil defaults to an hour).
+    ctx = _historical_response(testbed)
+    km = testbed.keymaster
+
+    run(km.set_current_id("Carol"))
+    credential = run(km.get_credential(ctx["vc"]))
+    victor = run(km.resolve_did("Victor"))["didDocument"]["id"]
+    response = {"challenge": ctx["challenge"], "credentials": [{"vc": ctx["vc"], "vp": credential}],
+                "requested": 1, "fulfilled": 1, "match": True}
+    legacy = run(km.encrypt_json({"response": response}, victor))
+
+    verified = _verify_at(testbed, legacy)
+    assert verified["match"] is False
+    assert verified["vps"] == []

@@ -869,6 +869,33 @@ verifier-prover protocol:
 }
 ```
 
+Each presentation (`vp`) is a separate asset that re-encrypts the credential's
+exact plaintext to the challenger with `includeHash`, so its `cipher_hash`
+equals the credential's. Verification counts a presented credential only when:
+
+1. the credential and presentation both resolve to live encrypted assets
+   (a revoked credential or presentation is not counted);
+2. their `cipher_hash` values are equal, binding the presentation to the
+   credential DID's current content;
+3. the decrypted presentation carries a valid proof from its issuer
+   (`verifyProof`) and a `type` array;
+4. if it names a `credentialSchema`, the challenge requests that schema and,
+   when the request lists `issuers`, includes the presentation's issuer.
+
+`vps` holds the credentials that pass, and `match` is whether their number
+equals the number of credentials the challenge requests. `requested` and
+`fulfilled` are the responder's own counts, returned as sent.
+
+An entry whose `vc` or `vp` is not a DID string is not counted. Python
+keymasters before #1300 embedded the credential itself as `vp`; nothing binds
+that copy to the credential DID, so such responses do not verify. Responses
+default to a one-hour `validUntil`, so these do not persist.
+
+Both ports create and verify this format. `tests/fixtures/response-interop.json`
+holds responses each port created and the other verified against a real
+Gatekeeper; each unit suite re-verifies the other port's responses from it
+(regenerate with `tests/keymaster/generate-response-interop-vectors.mjs`).
+
 ### 9.4 Historical response verification
 
 By default `verifyResponse` checks the current state of every DID involved, so
@@ -923,13 +950,6 @@ await keymaster.verifyResponse(responseDid, { versionTime: '2026-09-01T00:15:00Z
 ```python
 keymaster.verify_response(response_did, {"versionTime": "2026-09-01T00:15:00Z"})
 ```
-
-The Python keymaster currently embeds each presented credential in the
-encrypted response rather than creating a separate presentation DID, so its
-historical selector applies to the response, challenge and credential reads.
-The credential read decides only whether the credential was revoked: the
-embedded copy is not compared with the credential's content, so a credential
-update does not change a Python verification (#1300).
 
 ---
 

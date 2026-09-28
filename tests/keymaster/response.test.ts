@@ -425,6 +425,67 @@ describe('verifyResponse', () => {
     });
 });
 
+describe('verifyResponse presentation binding', () => {
+    it('does not count a credential without a valid issuer proof', async () => {
+        const alice = await keymaster.createId('Alice');
+        const carol = await keymaster.createId('Carol');
+        const victor = await keymaster.createId('Victor');
+
+        await keymaster.setCurrentId('Alice');
+        const schema = await keymaster.createSchema(mockSchema);
+        const bound = await keymaster.bindCredential(carol, { schema });
+        const genuine = (await keymaster.getCredential(await keymaster.issueCredential(bound)))!;
+
+        // Carol claims Alice issued a credential Alice never signed. The
+        // presentation's hash matches the credential DID, so only the proof
+        // check can reject it.
+        await keymaster.setCurrentId('Carol');
+        const forged = structuredClone(genuine);
+        forged.credentialSubject!.email = 'forged@example.com';
+        const plaintext = JSON.stringify(forged);
+        const vc = await keymaster.encryptMessage(plaintext, carol, { includeHash: true });
+
+        await keymaster.setCurrentId('Victor');
+        const challenge = await keymaster.createChallenge({ credentials: [{ schema, issuers: [alice] }] });
+
+        await keymaster.setCurrentId('Carol');
+        const vp = await keymaster.encryptMessage(plaintext, victor, { includeHash: true });
+        const response = { challenge, credentials: [{ vc, vp }], requested: 1, fulfilled: 1, match: true };
+        const responseDid = await keymaster.encryptJSON({ response }, victor);
+
+        await keymaster.setCurrentId('Victor');
+        const verified = await keymaster.verifyResponse(responseDid);
+        expect(verified.match).toBe(false);
+        expect(verified.vps).toEqual([]);
+    });
+
+    it('does not count a legacy response that embeds the credential', async () => {
+        const alice = await keymaster.createId('Alice');
+        const carol = await keymaster.createId('Carol');
+        const victor = await keymaster.createId('Victor');
+
+        await keymaster.setCurrentId('Alice');
+        const schema = await keymaster.createSchema(mockSchema);
+        const vc = await keymaster.issueCredential(await keymaster.bindCredential(carol, { schema }));
+
+        await keymaster.setCurrentId('Carol');
+        await keymaster.acceptCredential(vc);
+        const credential = await keymaster.getCredential(vc);
+
+        await keymaster.setCurrentId('Victor');
+        const challenge = await keymaster.createChallenge({ credentials: [{ schema, issuers: [alice] }] });
+
+        await keymaster.setCurrentId('Carol');
+        const response = { challenge, credentials: [{ vc, vp: credential }], requested: 1, fulfilled: 1, match: true };
+        const legacy = await keymaster.encryptJSON({ response }, victor);
+
+        await keymaster.setCurrentId('Victor');
+        const verified = await keymaster.verifyResponse(legacy);
+        expect(verified.match).toBe(false);
+        expect(verified.vps).toEqual([]);
+    });
+});
+
 describe('verifyResponse historical', () => {
     const T0 = '2026-09-01T00:00:00.000Z';
     const at = (minutes: number) => new Date(Date.parse(T0) + minutes * 60_000).toISOString();

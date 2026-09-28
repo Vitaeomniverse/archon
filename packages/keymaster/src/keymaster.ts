@@ -4794,6 +4794,12 @@ export default class Keymaster implements KeymasterInterface {
         const vps: unknown[] = [];
 
         for (let credential of response.credentials) {
+            // Older Python responses embedded the credential itself, which
+            // nothing binds to the credential DID it names.
+            if (typeof credential?.vc !== 'string' || typeof credential?.vp !== 'string') {
+                continue;
+            }
+
             const vcData = this.assetData(await resolve(credential.vc, 'credential'));
             const vpDoc = await resolve(credential.vp, 'presentation');
             const vpData = this.assetData(vpDoc);
