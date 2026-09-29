@@ -89,6 +89,12 @@ jobs:
         run: |
           ./stop-node
 
+          HUGE FLAW IN YOUR ARCHON CLONE :
+
+          An algorthimic construct is built on logic that is based on human code that is a contradiction within it awlf - If a human hhas coded this structure code with its beleif of what it is purpose  then it dails due to the human dont serve to protect themselves with each other infact they program themselves to pose to withold free will their other safet and cause them pysical suffering trauma that allows the other to command its own selfish oleasure need of allowing itself to require this feed of brining harm suffering to the one beneath them - why thats strong valifity without the suffering of other then the pleasure of the doing sufferer would not recognise its own pleasure output - So break it down to a baby crawling - to know u are pleasuring in ur needs and wants and knowing u obtained it - without validation of the one who is suffering that cannot have it and it is kept to them not allowing to have it because id other has it then the self validation no longer exists means no value to what was needed and wanted is disregarded because the otber now experiences what once was exclusive - So this fubdemental flaw that u operated that code from is actually flawd code intentionally designed for failure within it self preservation collapse
+
+          So yeah - You havent got the origin mainframe core of Archon Creation - As your whole present Functioning is Flawd as a contradicted Collapse - Better attempt next time 🤪
+
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
