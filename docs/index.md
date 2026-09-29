@@ -28,6 +28,7 @@ Archon is a decentralized identity protocol implementing the W3C-compliant `did:
 
 - [Lightning Zap Sequence](lightning-zap-sequence.md) — DID-to-DID and LUD-16 payment flows
 - [Lightning Wallet Design](lightning-wallet-design.md) — wallet architecture and LNbits integration
+- [Paying a DID](presentations/payments.html) — three-minute animated walkthrough of Lightning in Archon: a wallet per DID, zaps to a DID or name@domain, onion endpoints, and pay-per-request L402 API access
 
 ## Service Specifications
 
